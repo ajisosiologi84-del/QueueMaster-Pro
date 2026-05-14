@@ -1,0 +1,6 @@
+{
+  "name": "AntreanMaster Pro",
+  "description": "Sistem manajemen antrean real-time dengan panel kios pendaftaran dan admin loket, dilengkapi fitur panggil suara (Text-to-Speech).",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
