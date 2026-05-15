@@ -44,8 +44,8 @@ async function startServer() {
   ];
   let config = {
     servingIndex: -1,
-    kioskTitle: "Antrean PPDB 2024",
-    kioskSubtitle: "Loket Layanan Informasi & Pendaftaran",
+    appTitle: "Antrean PPDB 2024",
+    appSubtitle: "Loket Layanan Informasi & Pendaftaran",
     logoUrl: "",
     barcodeUrl: ""
   };

@@ -132,6 +132,11 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isKioskMode, setIsKioskMode] = useState(false);
   const [isManualSchool, setIsManualSchool] = useState(false);
+
+  // local settings state for editing
+  const [editTitle, setEditTitle] = useState('');
+  const [editSubtitle, setEditSubtitle] = useState('');
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   
   // Forms & Modals
   const [formData, setFormData] = useState({ nama: '', asalSekolah: '', noHp: '' });
@@ -164,6 +169,9 @@ export default function App() {
       setQueues(data.queues);
       setSchools(data.schools);
       setConfig(data.config);
+      // Initialize edit fields when data arrives
+      setEditTitle(prev => prev || data.config.appTitle);
+      setEditSubtitle(prev => prev || data.config.appSubtitle);
     } catch (err) {
       console.error("Failed to fetch initial data:", err);
     }
@@ -468,6 +476,31 @@ export default function App() {
       updateConfig({ barcodeUrl: base64String });
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleSaveSettings = async () => {
+    setIsSavingSettings(true);
+    try {
+      await updateConfig({ 
+        appTitle: editTitle, 
+        appSubtitle: editSubtitle 
+      });
+      setModal({
+        isOpen: true,
+        title: 'Berhasil',
+        message: 'Pengaturan aplikasi telah diperbarui.',
+        type: 'info'
+      });
+    } catch (error) {
+      setModal({
+        isOpen: true,
+        title: 'Gagal',
+        message: 'Gagal menyimpan pengaturan.',
+        type: 'error'
+      });
+    } finally {
+      setIsSavingSettings(false);
+    }
   };
 
   const currentQueueObj = config.servingIndex >= 0 && config.servingIndex < queues.length ? queues[config.servingIndex] : null;
@@ -1511,8 +1544,8 @@ export default function App() {
                         <label className="block text-sm font-semibold text-slate-700 mb-1">Nama Aplikasi</label>
                         <input 
                           type="text" 
-                          value={config.appTitle}
-                          onChange={(e) => updateConfig({ appTitle: e.target.value })}
+                          value={editTitle}
+                          onChange={(e) => setEditTitle(e.target.value)}
                           className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                           placeholder="Misal: SPMB 2026"
                           id="app-title-input"
@@ -1522,12 +1555,26 @@ export default function App() {
                         <label className="block text-sm font-semibold text-slate-700 mb-1">Keterangan Tambahan</label>
                         <input 
                           type="text" 
-                          value={config.appSubtitle}
-                          onChange={(e) => updateConfig({ appSubtitle: e.target.value })}
+                          value={editSubtitle}
+                          onChange={(e) => setEditSubtitle(e.target.value)}
                           className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
                           placeholder="Misal: Universitas Teknologi Terpadu"
                           id="app-subtitle-input"
                         />
+                      </div>
+                      <div className="pt-2">
+                        <button
+                          onClick={handleSaveSettings}
+                          disabled={isSavingSettings || (editTitle === config.appTitle && editSubtitle === config.appSubtitle)}
+                          className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-md transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                          {isSavingSettings ? (
+                            <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full" />
+                          ) : (
+                            <CheckCircle2 className="h-4 w-4" />
+                          )}
+                          <span>SIMPAN PERUBAHAN</span>
+                        </button>
                       </div>
                     </div>
                   </div>
