@@ -199,8 +199,8 @@ export default function App() {
       } else {
         setModal({
           isOpen: true,
-          title: 'Akses Ditolak',
-          message: 'Username atau password salah. Coba: admin / adminSPMB',
+          title: 'Gagal Masuk',
+          message: 'Akses Ditolak',
           type: 'error'
         });
       }
@@ -1030,7 +1030,7 @@ export default function App() {
                         value={authEmail}
                         onChange={(e) => setAuthEmail(e.target.value)}
                         className="w-full px-4 py-2.5 rounded-xl border border-slate-200 focus:ring-2 focus:ring-blue-500 outline-none text-sm"
-                        placeholder="admin"
+                        placeholder="Username"
                       />
                     </div>
                     <div>
