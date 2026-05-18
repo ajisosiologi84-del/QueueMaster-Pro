@@ -38,10 +38,19 @@ import {
   Calendar,
   GraduationCap,
   BookOpen,
-  QrCode
+  QrCode,
+  Hash,
+  Pencil,
+  Play,
+  Pause,
+  ChevronLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
+import { jsPDF } from 'jspdf';
+import html2canvas from 'html2canvas';
+import { initAuth, googleSignIn, getAccessToken, logout } from './lib/firebase';
+import type { User as FirebaseUser } from 'firebase/auth';
 
 // --- Configuration ---
 const API_URL = ''; // Same origin
@@ -50,10 +59,10 @@ interface QueueItem {
   id: string;
   number: string;
   nama: string;
+  nisn: string;
   asalSekolah: string;
   noHp: string;
-  status: 'waiting' | 'serving' | 'completed';
-  participantStatus?: 'Terdaftar' | 'Diterima' | 'Ditolak';
+  status: 'waiting' | 'serving' | 'completed' | 'rejected';
   timestamp: string;
 }
 
@@ -63,11 +72,23 @@ interface AppConfig {
   servingIndex: number;
   logoUrl?: string;
   barcodeUrl?: string;
+  serviceStartTime: string;
+  serviceEndTime: string;
+  ticketTemplate?: 'receipt' | 'modern' | 'elegant';
+  isServicePaused?: boolean;
 }
 
 interface School {
   id: string;
   nama: string;
+}
+
+interface Operator {
+  id: string;
+  username: string;
+  password: string;
+  displayName: string;
+  tableNumber: string;
 }
 
 // --- Components ---
@@ -120,12 +141,23 @@ export default function App() {
   // App State
   const [queues, setQueues] = useState<QueueItem[]>([]);
   const [schools, setSchools] = useState<School[]>([]);
+  const [operators, setOperators] = useState<Operator[]>([]);
+  const [currentUser, setCurrentUser] = useState<{ type: 'admin' | 'operator', name: string, table?: string } | null>(null);
+  
+  // Google Auth State
+  const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
+  const [googleAuthError, setGoogleAuthError] = useState(false);
+  const [isExportingSheets, setIsExportingSheets] = useState(false);
   const [config, setConfig] = useState<AppConfig>({
     appTitle: 'Antrean PPDB',
     appSubtitle: 'Loket Layanan Pendaftaran',
     servingIndex: -1,
     logoUrl: '',
-    barcodeUrl: ''
+    barcodeUrl: '',
+    serviceStartTime: '08:00',
+    serviceEndTime: '15:00',
+    ticketTemplate: 'receipt',
+    isServicePaused: false
   });
   
   const [activeTab, setActiveTab] = useState<'kiosk' | 'admin' | 'database'>('kiosk');
@@ -136,10 +168,15 @@ export default function App() {
   // local settings state for editing
   const [editTitle, setEditTitle] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
+  const [editStartTime, setEditStartTime] = useState('');
+  const [editEndTime, setEditEndTime] = useState('');
+  const [editTicketTemplate, setEditTicketTemplate] = useState<'receipt' | 'modern' | 'elegant'>('receipt');
+  const [editIsServicePaused, setEditIsServicePaused] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [lastCreatedQueue, setLastCreatedQueue] = useState<QueueItem | null>(null);
   
   // Forms & Modals
-  const [formData, setFormData] = useState({ nama: '', asalSekolah: '', noHp: '' });
+  const [formData, setFormData] = useState({ nama: '', nisn: '', asalSekolah: '', noHp: '' });
   const [modal, setModal] = useState<{
     isOpen: boolean;
     title: string;
@@ -150,10 +187,16 @@ export default function App() {
 
   // Database Tab States
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState<'all' | 'waiting' | 'serving' | 'completed'>('all');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'waiting' | 'serving' | 'completed' | 'rejected'>('all');
   const [selectedQueue, setSelectedQueue] = useState<QueueItem | null>(null);
 
+  // Operator management state
+  const [opFormData, setOpFormData] = useState({ username: '', password: '', displayName: '', tableNumber: '' });
+  const [isAddingOp, setIsAddingOp] = useState(false);
+  const [editingOperatorId, setEditingOperatorId] = useState<string | null>(null);
+
   const [currentTime, setCurrentTime] = useState(new Date());
+  const [isInitialLoading, setIsInitialLoading] = useState(true);
 
   // Clock Effect
   useEffect(() => {
@@ -164,16 +207,27 @@ export default function App() {
   // --- Data Fetching ---
   const fetchData = async () => {
     try {
-      const response = await fetch(`${API_URL}/api/initial-data`);
+      const endpoint = `${API_URL}/api/initial-data`;
+      const response = await fetch(endpoint);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
       const data = await response.json();
-      setQueues(data.queues);
-      setSchools(data.schools);
+      setQueues(data.queues || []);
+      setSchools(data.schools || []);
+      setOperators(data.operators || []);
       setConfig(data.config);
       // Initialize edit fields when data arrives
       setEditTitle(prev => prev || data.config.appTitle);
       setEditSubtitle(prev => prev || data.config.appSubtitle);
-    } catch (err) {
-      console.error("Failed to fetch initial data:", err);
+      setEditStartTime(prev => prev || data.config.serviceStartTime);
+      setEditEndTime(prev => prev || data.config.serviceEndTime);
+      setEditTicketTemplate(prev => prev || data.config.ticketTemplate || 'receipt');
+      setIsInitialLoading(false);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+         console.warn("Retrying fetch...");
+      }
     }
   };
 
@@ -181,7 +235,17 @@ export default function App() {
   useEffect(() => {
     fetchData();
     const interval = setInterval(fetchData, 3000);
-    return () => clearInterval(interval);
+    
+    // Initialize Google Auth listener
+    const unsubscribeAuth = initAuth(
+      (user) => { setGoogleUser(user); setGoogleAuthError(false); },
+      () => { setGoogleUser(null); setGoogleAuthError(true); }
+    );
+    
+    return () => {
+      clearInterval(interval);
+      unsubscribeAuth();
+    };
   }, []);
 
   // --- Simplified Auth Handlers ---
@@ -189,20 +253,30 @@ export default function App() {
     e.preventDefault();
     setAuthLoading(true);
     
-    // Simulate a simple login check
-    // We use a fixed password for simplicity as requested by user
     setTimeout(() => {
+      // 1. Check Super Admin
       if (authEmail === 'admin' && authPassword === 'adminSPMB') {
         setIsAdmin(true);
+        setCurrentUser({ type: 'admin', name: 'Super Admin' });
         setAuthEmail('');
         setAuthPassword('');
-      } else {
-        setModal({
-          isOpen: true,
-          title: 'Gagal Masuk',
-          message: 'Akses Ditolak',
-          type: 'error'
-        });
+      } 
+      // 2. Check Operators
+      else {
+        const foundOperator = operators.find(op => op.username === authEmail && op.password === authPassword);
+        if (foundOperator) {
+            setIsAdmin(true); // Allow admin panel access
+            setCurrentUser({ type: 'operator', name: foundOperator.displayName, table: foundOperator.tableNumber });
+            setAuthEmail('');
+            setAuthPassword('');
+        } else {
+            setModal({
+                isOpen: true,
+                title: 'Gagal Masuk',
+                message: 'Akses Ditolak',
+                type: 'error'
+            });
+        }
       }
       setAuthLoading(false);
     }, 500);
@@ -210,6 +284,7 @@ export default function App() {
 
   const handleGlobalLogout = () => {
     setIsAdmin(false);
+    setCurrentUser(null);
     setIsKioskMode(false);
     setActiveTab('kiosk');
   };
@@ -242,9 +317,66 @@ export default function App() {
     window.speechSynthesis.speak(utterance);
   }, []);
 
+  const isServiceOpen = () => {
+    const now = new Date();
+    const currentStr = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
+    return currentStr >= config.serviceStartTime && currentStr <= config.serviceEndTime;
+  };
+
   // --- API Handlers ---
   const handleAmbilAntrean = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    if (config.isServicePaused) {
+      setModal({
+        isOpen: true,
+        title: 'Layanan Dijeda',
+        message: 'Maaf, layanan antrean saat ini sedang dijeda sementara oleh petugas. Mohon tunggu beberapa saat dan coba kembali.',
+        type: 'error'
+      });
+      return;
+    }
+
+    if (!isServiceOpen()) {
+      setModal({
+        isOpen: true,
+        title: 'Layanan Tutup',
+        message: `Maaf, jam operasional layanan adalah ${config.serviceStartTime} - ${config.serviceEndTime} WIB.\nSekarang adalah jam ${currentTime.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB.`,
+        type: 'error'
+      });
+      return;
+    }
+
+    if (formData.nisn.length !== 10 || !/^\d+$/.test(formData.nisn)) {
+      setModal({
+        isOpen: true,
+        title: 'Input Tidak Valid',
+        message: 'NISN harus berisi tepat 10 digit angka.',
+        type: 'error'
+      });
+      return;
+    }
+
+    if (/\d/.test(formData.nama)) {
+      setModal({
+        isOpen: true,
+        title: 'Input Tidak Valid',
+        message: 'Nama lengkap tidak boleh mengandung angka.',
+        type: 'error'
+      });
+      return;
+    }
+
+    if (!/^\d+$/.test(formData.noHp)) {
+      setModal({
+        isOpen: true,
+        title: 'Input Tidak Valid',
+        message: 'Nomor Handphone hanya boleh berisi angka.',
+        type: 'error'
+      });
+      return;
+    }
+
     try {
       const nextNum = queues.length + 1;
       const formattedNumber = `A-${nextNum.toString().padStart(3, '0')}`;
@@ -255,6 +387,7 @@ export default function App() {
         body: JSON.stringify({
           number: formattedNumber,
           nama: formData.nama,
+          nisn: formData.nisn,
           asalSekolah: formData.asalSekolah,
           noHp: formData.noHp
         }),
@@ -262,6 +395,7 @@ export default function App() {
 
       if (response.ok) {
         const newQueue = await response.json();
+        setLastCreatedQueue(newQueue);
         // Auto-add school if not exists
         if (!schools.some(s => s.nama === formData.asalSekolah)) {
           await fetch(`${API_URL}/api/schools`, {
@@ -272,12 +406,12 @@ export default function App() {
         }
         
         fetchData();
-        setFormData({ nama: '', asalSekolah: '', noHp: '' });
+        setFormData({ nama: '', nisn: '', asalSekolah: '', noHp: '' });
         setIsManualSchool(false);
         setModal({
           isOpen: true,
           title: 'BERHASIL!',
-          message: `Nomor Antrean: ${formattedNumber}\nNama: ${newQueue.nama}\n\nSilakan tunggu giliran Anda.`,
+          message: `NOMOR ANTREAN: ${formattedNumber}\nNAMA: ${newQueue.nama}`,
           type: 'info'
         });
       }
@@ -290,6 +424,10 @@ export default function App() {
     if (config.servingIndex < queues.length - 1) {
       const nextIndex = config.servingIndex + 1;
       const nextQueue = queues[nextIndex];
+      
+      // Optimistically update the UI immediately before speaking
+      setConfig(prev => ({ ...prev, servingIndex: nextIndex }));
+      speakQueue(nextQueue);
       
       try {
         // Update config
@@ -316,10 +454,44 @@ export default function App() {
         }
         
         fetchData();
-        speakQueue(nextQueue);
       } catch (error) {
         console.error("API Error:", error);
       }
+    }
+  };
+
+  const handlePanggilManual = async (direction: 'next' | 'prev') => {
+    let newIndex = config.servingIndex;
+    if (direction === 'next' && config.servingIndex < queues.length - 1) {
+      newIndex += 1;
+    } else if (direction === 'prev' && config.servingIndex >= 0) {
+      newIndex -= 1;
+    } else {
+      return;
+    }
+    
+    if (newIndex < 0) return;
+    
+    const targetQueue = queues[newIndex];
+    setConfig(prev => ({ ...prev, servingIndex: newIndex }));
+    speakQueue(targetQueue);
+
+    try {
+      await fetch(`${API_URL}/api/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ servingIndex: newIndex }),
+      });
+      
+      await fetch(`${API_URL}/api/queues/${targetQueue.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'serving' }),
+      });
+      
+      fetchData();
+    } catch (error) {
+       console.error("API Error:", error);
     }
   };
 
@@ -342,16 +514,16 @@ export default function App() {
     });
   };
 
-  const handleUpdateParticipantStatus = async (id: string, status: string) => {
+  const handleUpdateQueueStatus = async (id: string, status: string) => {
     try {
       await fetch(`${API_URL}/api/queues/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ participantStatus: status }),
+        body: JSON.stringify({ status })
       });
       fetchData();
       if (selectedQueue && selectedQueue.id === id) {
-        setSelectedQueue(prev => prev ? { ...prev, participantStatus: status as any } : null);
+        setSelectedQueue(prev => prev ? { ...prev, status: status as any } : null);
       }
     } catch (err) {
       console.error(err);
@@ -378,6 +550,85 @@ export default function App() {
       fetchData();
     } catch (error) {
       console.error(error);
+    }
+  };
+
+  const handleGoogleLogin = async () => {
+    try {
+      await googleSignIn();
+    } catch (err) {
+      setModal({ isOpen: true, title: 'Login Gagal', message: 'Gagal login melalui Google. Silakan coba lagi.', type: 'error' });
+    }
+  };
+
+  const exportToGoogleSheets = async () => {
+    const token = await getAccessToken();
+    if (!token) {
+      setModal({ isOpen: true, title: 'Error', message: 'Silakan login ke Google terlebih dahulu.', type: 'error' });
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Anda akan mengekspor ${queues.length} data antrean ke Google Sheets. Apakah Anda yakin?`
+    );
+    if (!confirmed) return;
+
+    setIsExportingSheets(true);
+    try {
+      // Create a Google Sheet
+      const res = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          properties: {
+            title: `Data_Antrean_${new Date().toISOString().split('T')[0]}`
+          }
+        })
+      });
+
+      const sheetData = await res.json();
+      if (!res.ok) throw new Error(sheetData.error?.message || 'Gagal membuat spreadsheet');
+
+      const spreadsheetId = sheetData.spreadsheetId;
+
+      // Formatting data
+      const headers = ['Nomor Antrean', 'NISN', 'Nama Pendaftar', 'Asal Sekolah', 'No HP', 'Waktu Ambil', 'Status', 'Waktu Selesai'];
+      const values = queues.map(q => [
+        q.number || '',
+        ...[q.nisn, q.nama, q.asalSekolah, q.noHp].map(String),
+        new Date(q.timestamp).toLocaleString('id-ID'),
+        q.status,
+        q.completedAt ? new Date(q.completedAt).toLocaleString('id-ID') : '-'
+      ]);
+
+      // Update data into the new Sheet
+      const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:H${values.length + 1}?valueInputOption=USER_ENTERED`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          values: [headers, ...values]
+        })
+      });
+
+      if (!updateRes.ok) throw new Error('Gagal menulis data ke spreadsheet');
+
+      setModal({ 
+        isOpen: true, 
+        title: 'Berhasil', 
+        message: `Data berhasil diekspor ke Google Sheets!\nID Spreadsheet: ${spreadsheetId}\nAnda bisa melihatnya di Google Drive akun yang Anda gunakan.`, 
+        type: 'info' 
+      });
+
+    } catch (error: any) {
+      setModal({ isOpen: true, title: 'Error Eksport', message: error.message || 'Terjadi kesalahan saat mengekspor ke Google Sheets', type: 'error' });
+    } finally {
+      setIsExportingSheets(false);
     }
   };
 
@@ -483,7 +734,10 @@ export default function App() {
     try {
       await updateConfig({ 
         appTitle: editTitle, 
-        appSubtitle: editSubtitle 
+        appSubtitle: editSubtitle,
+        serviceStartTime: editStartTime,
+        serviceEndTime: editEndTime,
+        ticketTemplate: editTicketTemplate
       });
       setModal({
         isOpen: true,
@@ -503,9 +757,110 @@ export default function App() {
     }
   };
 
+  const downloadTicket = async (queue: QueueItem) => {
+    const ticketElement = document.getElementById('ticket-download-template');
+    if (!ticketElement) return;
+
+    try {
+      const canvas = await html2canvas(ticketElement, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#ffffff'
+      });
+      
+      const imgData = canvas.toDataURL('image/png');
+      const pdf = new jsPDF({
+        orientation: 'portrait',
+        unit: 'mm',
+        format: [80, 120] // Custom ticket size
+      });
+
+      const imgWidth = 80;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      
+      pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
+      pdf.save(`Tiket_Antrean_${queue.number}.pdf`);
+    } catch (error) {
+      console.error("Export ticket error:", error);
+    }
+  };
+
+  const handleAddOperator = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsAddingOp(true);
+    try {
+      const isEditing = !!editingOperatorId;
+      const url = isEditing 
+        ? `${API_URL}/api/operators/${editingOperatorId}`
+        : `${API_URL}/api/operators`;
+      const method = isEditing ? 'PUT' : 'POST';
+      
+      const response = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(opFormData),
+      });
+      if (response.ok) {
+        fetchData();
+        setOpFormData({ username: '', password: '', displayName: '', tableNumber: '' });
+        setEditingOperatorId(null);
+        setModal({ isOpen: true, title: 'Berhasil', message: isEditing ? 'Operator berhasil diperbarui.' : 'Operator baru telah ditambahkan.', type: 'info' });
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsAddingOp(false);
+    }
+  };
+
+  const handleEditOperatorBtn = (op: any) => {
+    setEditingOperatorId(op.id);
+    setOpFormData({
+      username: op.username,
+      password: op.password,
+      displayName: op.displayName,
+      tableNumber: op.tableNumber
+    });
+  };
+
+  const handleCancelEditOp = () => {
+    setEditingOperatorId(null);
+    setOpFormData({ username: '', password: '', displayName: '', tableNumber: '' });
+  };
+
+  const handleDeleteOperator = async (id: string) => {
+    setModal({
+      isOpen: true,
+      title: 'Hapus Operator',
+      message: 'Apakah Anda yakin ingin menghapus operator ini?',
+      type: 'confirm',
+      onConfirm: async () => {
+        try {
+          await fetch(`${API_URL}/api/operators/${id}`, { method: 'DELETE' });
+          fetchData();
+        } catch (err) {
+          console.error(err);
+        }
+      }
+    });
+  };
+
   const currentQueueObj = config.servingIndex >= 0 && config.servingIndex < queues.length ? queues[config.servingIndex] : null;
   const waitingCount = queues.length - (config.servingIndex + 1);
   const totalCount = queues.length;
+
+  if (isInitialLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
+        <StudentAnimation className="mb-8 scale-150" />
+        <div className="bg-white p-8 rounded-3xl shadow-xl border border-slate-100 flex flex-col items-center max-w-xs w-full">
+          <div className="animate-spin h-10 w-10 border-4 border-blue-600 border-t-transparent rounded-full mb-4" />
+          <h2 className="text-xl font-black text-slate-800 uppercase tracking-tight">Memuat Data</h2>
+          <p className="text-slate-400 text-xs mt-2 font-medium text-center">Menghubungkan ke server loket antrean...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-800 flex flex-col relative selection:bg-blue-100">
@@ -530,6 +885,19 @@ export default function App() {
               </div>
               <h3 className="text-xl font-bold mb-2 text-slate-800">{modal.title}</h3>
               <p className="text-slate-600 mb-8 whitespace-pre-wrap text-sm leading-relaxed">{modal.message}</p>
+              
+              {modal.title === 'BERHASIL!' && lastCreatedQueue && (
+                <div className="mb-8 flex flex-col items-center">
+                  <button
+                    onClick={() => downloadTicket(lastCreatedQueue)}
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-sm shadow-lg transition-all"
+                  >
+                    <Download className="h-4 w-4" />
+                    DOWNLOAD TIKET (PDF)
+                  </button>
+                </div>
+              )}
+
               <div className="flex justify-center space-x-3">
                 {modal.type === 'confirm' && (
                   <button
@@ -898,8 +1266,34 @@ export default function App() {
                     required
                     id="nama"
                     value={formData.nama}
-                    onChange={(e) => setFormData({...formData, nama: e.target.value})}
+                    onChange={(e) => {
+                      const value = e.target.value.replace(/[0-9]/g, '');
+                      setFormData({...formData, nama: value});
+                    }}
                     placeholder="Masukkan nama lengkap"
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-slate-700 mb-1 flex items-center space-x-2">
+                    <Hash className="h-4 w-4 text-slate-400" />
+                    <span>NISN</span>
+                  </label>
+                  <input 
+                    type="text" 
+                    required
+                    id="nisn"
+                    maxLength={10}
+                    minLength={10}
+                    pattern="[0-9]{10}"
+                    title="NISN harus persis 10 digit angka"
+                    value={formData.nisn}
+                    onChange={(e) => {
+                      const value = e.target.value.replace(/[^0-9]/g, '').slice(0, 10);
+                      setFormData({...formData, nisn: value});
+                    }}
+                    placeholder="Masukkan 10 digit NISN"
                     className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all outline-none"
                   />
                 </div>
@@ -977,8 +1371,13 @@ export default function App() {
                     type="tel" 
                     required
                     id="noHp"
+                    pattern="[0-9]*"
+                    title="Nomor HP hanya boleh berisi angka"
                     value={formData.noHp}
-                    onChange={(e) => setFormData({...formData, noHp: e.target.value})}
+                    onChange={(e) => {
+                      const value = e.target.value.replace(/[^0-9]/g, '');
+                      setFormData({...formData, noHp: value});
+                    }}
                     placeholder="08xxxxxxxxxx"
                     className="w-full px-4 py-3 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all outline-none"
                   />
@@ -987,11 +1386,12 @@ export default function App() {
                 <div className="pt-4">
                   <button 
                     type="submit"
-                    className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold py-4 px-6 rounded-xl shadow-md transition-all flex items-center justify-center space-x-3 group disabled:opacity-50"
+                    disabled={config.isServicePaused}
+                    className="w-full bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold py-4 px-6 rounded-xl shadow-md transition-all flex items-center justify-center space-x-3 group disabled:opacity-50 disabled:bg-slate-400 disabled:cursor-not-allowed"
                     id="submit-ticket-btn"
                   >
                     <Printer className="h-6 w-6 group-hover:scale-110 transition-transform" />
-                    <span className="text-lg">MASUKKAN DATA & CETAK</span>
+                    <span className="text-lg">{config.isServicePaused ? 'LAYANAN DIJEDA SEMENTARA' : 'MASUKKAN DATA & CETAK'}</span>
                   </button>
                 </div>
 
@@ -1085,6 +1485,28 @@ export default function App() {
                       <p className="text-sm text-slate-500 mt-1">Kelola dan lihat rincian pendaftar hari ini secara detail.</p>
                     </div>
                     <div className="flex items-center gap-3">
+                      {!googleUser ? (
+                        <button onClick={handleGoogleLogin} className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 text-sm font-bold rounded-xl hover:bg-slate-50 transition-colors shadow-sm">
+                          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-4 h-4">
+                            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                            <path fill="none" d="M0 0h48v48H0z"></path>
+                          </svg>
+                          <span>Sign in dengan Google</span>
+                        </button>
+                      ) : (
+                        <div className="flex bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-sm">
+                          <button onClick={exportToGoogleSheets} disabled={isExportingSheets} className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-700 text-sm font-bold hover:bg-emerald-100 transition-colors">
+                            <FileSpreadsheet className="h-4 w-4" />
+                            <span>{isExportingSheets ? 'Mengekspor...' : 'Export ke Google Sheets'}</span>
+                          </button>
+                          <button onClick={logout} title="Sign Out dari Google" className="px-3 py-2 bg-white text-slate-500 hover:text-red-600 hover:bg-red-50 border-l border-emerald-200 transition-colors">
+                            Logout
+                          </button>
+                        </div>
+                      )}
                       <button onClick={exportToExcel} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-bold rounded-xl hover:bg-emerald-700 transition-colors">
                         <FileSpreadsheet className="h-4 w-4" />
                         <span>Export Excel</span>
@@ -1110,7 +1532,7 @@ export default function App() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="flex items-center gap-2 bg-white border border-slate-200 rounded-xl p-1 shadow-sm">
-                        {(['all', 'waiting', 'serving', 'completed'] as const).map((status) => {
+                        {(['all', 'waiting', 'serving', 'completed', 'rejected'] as const).map((status) => {
                           const count = status === 'all' 
                             ? queues.length 
                             : queues.filter(q => q.status === status).length;
@@ -1126,7 +1548,7 @@ export default function App() {
                               }`}
                             >
                               <span>
-                                {status === 'all' ? 'Semua' : status === 'waiting' ? 'Menunggu' : status === 'serving' ? 'Melayani' : 'Selesai'}
+                                {status === 'all' ? 'Semua' : status === 'waiting' ? 'Menunggu' : status === 'serving' ? 'Melayani' : status === 'completed' ? 'Selesai' : 'Ditolak'}
                               </span>
                               <span className={`px-1.5 py-0.5 rounded-md text-[10px] ${
                                 filterStatus === status ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-500'
@@ -1148,7 +1570,6 @@ export default function App() {
                       <tr>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Antrean</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Nama Peserta</th>
-                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status Seleksi</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status Antrean</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Waktu Daftar</th>
                       </tr>
@@ -1174,25 +1595,17 @@ export default function App() {
                             <td className="px-6 py-4 font-bold text-slate-800">
                               <div>{q.nama}</div>
                               <div className="text-[10px] text-slate-400 font-normal flex items-center gap-1 mt-0.5">
-                                <Building className="h-2.5 w-2.5" /> {q.asalSekolah} • <Phone className="h-2.5 w-2.5" /> {q.noHp}
+                                NISN: {q.nisn || '-'} • <Building className="h-2.5 w-2.5 ml-1" /> {q.asalSekolah} • <Phone className="h-2.5 w-2.5 ml-1" /> {q.noHp}
                               </div>
-                            </td>
-                            <td className="px-6 py-4">
-                              <span className={`inline-flex px-3 py-1 rounded-full text-[10px] font-bold ${
-                                q.participantStatus === 'Diterima' ? 'bg-emerald-100 text-emerald-700' :
-                                q.participantStatus === 'Ditolak' ? 'bg-red-100 text-red-700' :
-                                'bg-slate-100 text-slate-600'
-                              }`}>
-                                {q.participantStatus || 'Terdaftar'}
-                              </span>
                             </td>
                             <td className="px-6 py-4">
                               <span className={`inline-flex px-2 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${
                                 q.status === 'completed' ? 'bg-emerald-100 text-emerald-700' :
                                 q.status === 'serving' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                                q.status === 'rejected' ? 'bg-red-100 text-red-700' :
                                 'bg-orange-100 text-orange-700'
                               }`}>
-                                {q.status === 'completed' ? 'Selesai' : q.status === 'serving' ? 'Melayani' : 'Menunggu'}
+                                {q.status === 'completed' ? 'Selesai' : q.status === 'serving' ? 'Melayani' : q.status === 'rejected' ? 'Ditolak' : 'Menunggu'}
                               </span>
                             </td>
                             <td className="px-6 py-4 text-slate-500 text-xs text-right">
@@ -1244,10 +1657,12 @@ export default function App() {
                             <span className={`px-4 py-1.5 rounded-full text-xs font-black uppercase tracking-[0.1em] ${
                               selectedQueue.status === 'completed' ? 'bg-emerald-500 text-white' :
                               selectedQueue.status === 'serving' ? 'bg-blue-500 text-white animate-pulse' :
+                              selectedQueue.status === 'rejected' ? 'bg-red-500 text-white' :
                               'bg-orange-500 text-white'
                             }`}>
                               {selectedQueue.status === 'completed' ? 'Status: Selesai' : 
                                selectedQueue.status === 'serving' ? 'Status: Sedang Dilayani' : 
+                               selectedQueue.status === 'rejected' ? 'Status: Ditolak' :
                                'Status: Menunggu Antrean'}
                             </span>
                           </div>
@@ -1257,6 +1672,10 @@ export default function App() {
                             <div className="space-y-1">
                               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Nama Lengkap</p>
                               <p className="text-lg font-bold text-slate-800">{selectedQueue.nama}</p>
+                            </div>
+                            <div className="space-y-1">
+                              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">NISN</p>
+                              <p className="text-lg font-bold text-slate-800">{selectedQueue.nisn || '-'}</p>
                             </div>
                             <div className="space-y-1">
                               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Nomor HP</p>
@@ -1285,24 +1704,39 @@ export default function App() {
                             </div>
                           </div>
                           
-                          <div className="pt-4 space-y-3">
-                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Update Status Seleksi</p>
+                          <div className="pt-2 pb-2 space-y-3">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Update Status Antrean</p>
                             <div className="flex gap-2">
-                                {(['Terdaftar', 'Diterima', 'Ditolak'] as const).map((s) => (
-                                  <button
-                                    key={s}
-                                    onClick={() => handleUpdateParticipantStatus(selectedQueue.id, s)}
-                                    className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
-                                      selectedQueue.participantStatus === s || (!selectedQueue.participantStatus && s === 'Terdaftar')
-                                        ? s === 'Diterima' ? 'bg-emerald-600 text-white border-emerald-600 shadow-md' :
-                                          s === 'Ditolak' ? 'bg-red-600 text-white border-red-600 shadow-md' :
-                                          'bg-slate-800 text-white border-slate-800 shadow-md'
-                                        : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                                    }`}
-                                  >
-                                    {s}
-                                  </button>
-                                ))}
+                                <button
+                                  onClick={() => handleUpdateQueueStatus(selectedQueue.id, 'completed')}
+                                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+                                    selectedQueue.status === 'completed'
+                                      ? 'bg-emerald-600 text-white border-emerald-600 shadow-md'
+                                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                  }`}
+                                >
+                                  Selesai
+                                </button>
+                                <button
+                                  onClick={() => handleUpdateQueueStatus(selectedQueue.id, 'rejected')}
+                                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+                                    selectedQueue.status === 'rejected'
+                                      ? 'bg-red-600 text-white border-red-600 shadow-md'
+                                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                  }`}
+                                >
+                                  Ditolak
+                                </button>
+                                <button
+                                  onClick={() => handleUpdateQueueStatus(selectedQueue.id, 'waiting')}
+                                  className={`flex-1 py-2 px-3 rounded-xl text-xs font-bold border transition-all ${
+                                    selectedQueue.status === 'waiting'
+                                      ? 'bg-orange-600 text-white border-orange-600 shadow-md'
+                                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                                  }`}
+                                >
+                                  Menunggu
+                                </button>
                             </div>
                           </div>
                           
@@ -1409,10 +1843,12 @@ export default function App() {
                 {/* Control Panel */}
                 <div className="space-y-6">
                   <div className="bg-white rounded-2xl shadow-lg border border-slate-100 overflow-hidden">
-                    <div className="bg-emerald-600 p-4 flex justify-between items-center text-white">
+                      <div className="bg-emerald-600 p-4 flex justify-between items-center text-white">
                       <div className="flex items-center space-x-2">
                         <Mic className="h-5 w-5" />
-                        <h2 className="font-semibold">Panel Loket Utama</h2>
+                        <h2 className="font-semibold">
+                            {currentUser?.type === 'operator' ? `Panel Operator: ${currentUser.name} (Meja ${currentUser.table})` : 'Panel Loket Utama'}
+                        </h2>
                       </div>
                       <button 
                         onClick={handleGlobalLogout} 
@@ -1448,9 +1884,29 @@ export default function App() {
                         id="call-next-btn"
                       >
                         <Volume2 className={`h-6 w-6 ${isSpeaking ? 'animate-pulse' : ''}`} />
-                        <span>{isSpeaking ? 'Sedang Memanggil...' : 'Panggil Selanjutnya'}</span>
+                        <span>{isSpeaking ? 'Sedang Memanggil...' : config.servingIndex < queues.length - 1 ? `Panggil ${queues[config.servingIndex + 1].number}` : 'Panggil Selanjutnya'}</span>
                         <ChevronRight className="h-6 w-6" />
                       </button>
+
+                      <div className="grid grid-cols-2 gap-4">
+                        <button 
+                          onClick={() => handlePanggilManual('prev')}
+                          disabled={config.servingIndex <= 0 || isSpeaking}
+                          className="py-3 px-4 rounded-xl font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                        >
+                          <ChevronLeft className="h-5 w-5" />
+                          <span className="text-sm">Mundur</span>
+                        </button>
+                        
+                        <button 
+                          onClick={() => handlePanggilManual('next')}
+                          disabled={config.servingIndex >= queues.length - 1 || isSpeaking}
+                          className="py-3 px-4 rounded-xl font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-300 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                        >
+                          <span className="text-sm">Maju</span>
+                          <ChevronRight className="h-5 w-5" />
+                        </button>
+                      </div>
 
                       <div className="grid grid-cols-2 gap-4">
                         <button 
@@ -1472,6 +1928,18 @@ export default function App() {
                           <span className="text-xs">Reset Antrean</span>
                         </button>
                       </div>
+
+                      <button
+                        onClick={() => updateConfig({ isServicePaused: !config.isServicePaused })}
+                        className={`w-full py-3 px-4 rounded-xl font-semibold border transition-all flex items-center justify-center gap-2 ${
+                          config.isServicePaused 
+                            ? 'bg-orange-600 text-white border-orange-700 hover:bg-orange-700' 
+                            : 'bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100'
+                        }`}
+                      >
+                        {config.isServicePaused ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
+                        <span>{config.isServicePaused ? 'Buka Layanan Kembali' : 'Jeda Layanan Sementara'}</span>
+                      </button>
                     </div>
                   </div>
 
@@ -1562,10 +2030,48 @@ export default function App() {
                           id="app-subtitle-input"
                         />
                       </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Layanan Buka</label>
+                          <input 
+                            type="time" 
+                            value={editStartTime}
+                            onChange={(e) => setEditStartTime(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm transition-all"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Layanan Tutup</label>
+                          <input 
+                            type="time" 
+                            value={editEndTime}
+                            onChange={(e) => setEditEndTime(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none text-sm transition-all"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Desain Tiket Antrean</label>
+                        <select
+                          value={editTicketTemplate}
+                          onChange={(e) => setEditTicketTemplate(e.target.value as 'receipt' | 'modern' | 'elegant')}
+                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all cursor-pointer bg-white"
+                        >
+                          <option value="receipt">Struk Sederhana (Default)</option>
+                          <option value="modern">Modern & Bersih</option>
+                          <option value="elegant">Elegan & Premium</option>
+                        </select>
+                      </div>
                       <div className="pt-2">
                         <button
                           onClick={handleSaveSettings}
-                          disabled={isSavingSettings || (editTitle === config.appTitle && editSubtitle === config.appSubtitle)}
+                          disabled={isSavingSettings || (
+                            editTitle === config.appTitle && 
+                            editSubtitle === config.appSubtitle &&
+                            editStartTime === config.serviceStartTime &&
+                            editEndTime === config.serviceEndTime &&
+                            editTicketTemplate === (config.ticketTemplate || 'receipt')
+                          )}
                           className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-md transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                         >
                           {isSavingSettings ? (
@@ -1606,6 +2112,105 @@ export default function App() {
                        </div>
                     </div>
                   </div>
+
+                  {/* Operator Management - ONLY FOR SUPER ADMIN */}
+                  {currentUser?.type === 'admin' && (
+                    <div className="bg-white rounded-2xl shadow-lg border border-slate-100 p-6">
+                      <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+                        <Users className="h-5 w-5 text-blue-600" />
+                        Manajemen Petugas (Operator)
+                      </h3>
+                      
+                      <form onSubmit={handleAddOperator} className="space-y-3 mb-6 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                        <div className="grid grid-cols-2 gap-3">
+                          <input 
+                            type="text" 
+                            placeholder="Username"
+                            required
+                            value={opFormData.username}
+                            onChange={e => setOpFormData({...opFormData, username: e.target.value})}
+                            className="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                          <input 
+                            type="password" 
+                            placeholder="Password"
+                            required
+                            value={opFormData.password}
+                            onChange={e => setOpFormData({...opFormData, password: e.target.value})}
+                            className="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                          <input 
+                            type="text" 
+                            placeholder="Nama Tampilan"
+                            required
+                            value={opFormData.displayName}
+                            onChange={e => setOpFormData({...opFormData, displayName: e.target.value})}
+                            className="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                          <input 
+                            type="text" 
+                            placeholder="No Meja"
+                            required
+                            value={opFormData.tableNumber}
+                            onChange={e => setOpFormData({...opFormData, tableNumber: e.target.value})}
+                            className="px-3 py-2 rounded-lg border border-slate-300 text-sm outline-none focus:ring-2 focus:ring-blue-500"
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            type="submit"
+                            disabled={isAddingOp}
+                            className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg text-sm shadow transition-all disabled:opacity-50"
+                          >
+                            {isAddingOp ? 'Menyimpan...' : (editingOperatorId ? 'Simpan Perubahan' : '+ Tambah Petugas')}
+                          </button>
+                          {editingOperatorId && (
+                            <button 
+                              type="button"
+                              onClick={handleCancelEditOp}
+                              className="px-4 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold py-2 rounded-lg text-sm transition-all"
+                            >
+                              Batal
+                            </button>
+                          )}
+                        </div>
+                      </form>
+
+                      <div className="space-y-3">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Daftar Operator Aktif</p>
+                        {operators.length > 0 ? (
+                          <div className="grid grid-cols-1 gap-2">
+                            {operators.map(op => (
+                              <div key={op.id} className="flex items-center justify-between p-3 bg-white border border-slate-100 rounded-xl shadow-sm hover:shadow-md transition-all">
+                                <div>
+                                  <p className="text-sm font-bold text-slate-800">{op.displayName} <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded ml-1">Meja {op.tableNumber}</span></p>
+                                  <p className="text-[10px] text-slate-400 font-mono">User: {op.username}</p>
+                                </div>
+                                <div className="flex items-center gap-1">
+                                  <button 
+                                    onClick={() => handleEditOperatorBtn(op)}
+                                    className="p-1.5 text-blue-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-all"
+                                    title="Edit Operator"
+                                  >
+                                    <Pencil className="h-4 w-4" />
+                                  </button>
+                                  <button 
+                                    onClick={() => handleDeleteOperator(op.id)}
+                                    className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                                    title="Hapus Operator"
+                                  >
+                                    <RotateCcw className="h-4 w-4" />
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 italic text-center py-4 bg-slate-50/50 border border-dashed border-slate-200 rounded-xl">Belum ada operator terdaftar</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             </>
@@ -1614,7 +2219,182 @@ export default function App() {
         )}
 
       </main>
+
+      {/* Hidden Download Template */}
+      <TicketTemplate queue={lastCreatedQueue} config={config} />
     </div>
   );
 }
+
+// --- Ticket Print Template (Hidden) ---
+const TicketTemplate = ({ queue, config }: { queue: QueueItem | null, config: AppConfig }) => {
+  if (!queue) return null;
+
+  const template = config.ticketTemplate || 'receipt';
+
+  if (template === 'modern') {
+    return (
+      <div 
+        id="ticket-download-template" 
+        className="p-8 w-[350px] flex flex-col items-start"
+        style={{ 
+          position: 'fixed', 
+          left: '-9999px', 
+          top: '0', 
+          fontFamily: 'system-ui, -apple-system, sans-serif', 
+          color: '#1e293b',
+          backgroundColor: '#ffffff'
+        }}
+      >
+        <div className="flex items-center gap-3 mb-6">
+          {config.logoUrl ? (
+            <img src={config.logoUrl} alt="Logo" className="h-12 w-12 object-contain" />
+          ) : (
+            <div className="p-2 rounded-xl" style={{ backgroundColor: '#2563eb' }}>
+              <Ticket className="h-6 w-6" color="#ffffff" />
+            </div>
+          )}
+          <div>
+            <h1 className="text-xl font-bold tracking-tight" style={{ color: '#0f172a' }}>{config.appTitle}</h1>
+            <p className="text-xs font-medium" style={{ color: '#64748b' }}>{config.appSubtitle}</p>
+          </div>
+        </div>
+
+        <div className="w-full rounded-2xl p-6 mb-6 text-center border" style={{ backgroundColor: '#eff6ff', borderColor: '#bfdbfe' }}>
+          <p className="text-xs font-bold uppercase tracking-widest mb-2" style={{ color: '#3b82f6' }}>Nomor Antrean Anda</p>
+          <h2 className="text-6xl font-black tracking-tight" style={{ color: '#1d4ed8' }}>{queue.number}</h2>
+        </div>
+
+        <div className="w-full space-y-4 mb-6">
+          <div className="p-4 rounded-xl border" style={{ backgroundColor: '#f8fafc', borderColor: '#e2e8f0' }}>
+            <p className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: '#94a3b8' }}>Nama Peserta</p>
+            <p className="text-sm font-bold" style={{ color: '#334155' }}>{queue.nama}</p>
+          </div>
+          <div className="flex gap-4">
+            <div className="flex-1 p-4 rounded-xl border" style={{ backgroundColor: '#f8fafc', borderColor: '#e2e8f0' }}>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: '#94a3b8' }}>NISN</p>
+              <p className="text-sm font-bold" style={{ color: '#334155' }}>{queue.nisn || '-'}</p>
+            </div>
+            <div className="flex-1 p-4 rounded-xl border" style={{ backgroundColor: '#f8fafc', borderColor: '#e2e8f0' }}>
+              <p className="text-[10px] font-bold uppercase tracking-wider mb-1" style={{ color: '#94a3b8' }}>Asal Sekolah</p>
+              <p className="text-sm font-bold truncate" style={{ color: '#334155' }}>{queue.asalSekolah}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="w-full border-t pt-4 flex justify-between items-center" style={{ borderColor: '#f1f5f9' }}>
+          <p className="text-[9px] font-medium" style={{ color: '#94a3b8' }}>Waktu Cetak: {new Date(queue.timestamp).toLocaleString('id-ID')}</p>
+          <p className="text-[10px] font-bold uppercase tracking-wider" style={{ color: '#3b82f6' }}>Harap Simpan</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (template === 'elegant') {
+    return (
+      <div 
+        id="ticket-download-template" 
+        className="p-8 w-[340px] flex flex-col items-center text-center border-4"
+        style={{ 
+          position: 'fixed', 
+          left: '-9999px', 
+          top: '0', 
+          fontFamily: 'Georgia, serif', 
+          color: '#3f3f46',
+          backgroundColor: '#fafafa',
+          borderColor: '#d4d4d8'
+        }}
+      >
+        <div className="mb-4">
+          {config.logoUrl ? (
+            <img src={config.logoUrl} alt="Logo" className="h-16 w-16 object-contain border p-1 rounded-full mx-auto" style={{ borderColor: '#d1d5db' }} />
+          ) : (
+            <Ticket className="h-10 w-10 mx-auto" color="#27272a" />
+          )}
+        </div>
+        <h1 className="text-2xl font-bold italic mb-1" style={{ color: '#18181b' }}>{config.appTitle}</h1>
+        <p className="text-xs uppercase tracking-widest" style={{ color: '#71717a' }}>{config.appSubtitle}</p>
+        
+        <div className="w-8 h-px my-6 mx-auto" style={{ backgroundColor: '#a1a1aa' }} />
+        
+        <p className="text-[10px] uppercase tracking-[0.3em] mb-2" style={{ color: '#52525b' }}>Tiket Antrean</p>
+        <h2 className="text-7xl mb-6" style={{ color: '#18181b', fontFamily: 'system-ui, sans-serif' }}>{queue.number}</h2>
+        
+        <div className="w-8 h-px my-6 mx-auto" style={{ backgroundColor: '#a1a1aa' }} />
+        
+        <div className="w-full space-y-4 mb-8">
+          <div>
+            <p className="text-[9px] uppercase tracking-widest italic" style={{ color: '#71717a' }}>Peserta</p>
+            <p className="text-base font-semibold" style={{ color: '#27272a' }}>{queue.nama}</p>
+          </div>
+          <div>
+            <p className="text-[9px] uppercase tracking-widest italic" style={{ color: '#71717a' }}>NISN & Sekolah</p>
+            <p className="text-sm" style={{ color: '#3f3f46' }}>{queue.nisn || '-'} • {queue.asalSekolah}</p>
+          </div>
+        </div>
+
+        <p className="text-[9px] italic" style={{ color: '#a1a1aa' }}>
+          Dicetak pada {new Date(queue.timestamp).toLocaleString('id-ID')}
+        </p>
+      </div>
+    );
+  }
+
+  // receipt template (default)
+  return (
+    <div 
+      id="ticket-download-template" 
+      className="p-6 w-[320px] flex flex-col items-center text-center"
+      style={{ 
+        position: 'fixed', 
+        left: '-9999px', 
+        top: '0', 
+        fontFamily: '"Courier New", Courier, monospace', 
+        color: '#000000',
+        backgroundColor: '#ffffff'
+      }}
+    >
+      <div className="mb-3">
+        {config.logoUrl ? (
+          <img src={config.logoUrl} alt="Logo" className="h-14 w-14 object-contain mx-auto" />
+        ) : (
+          <Ticket className="h-12 w-12 mx-auto" color="#000000" />
+        )}
+      </div>
+      <h1 className="text-xl font-bold leading-tight uppercase">{config.appTitle}</h1>
+      <p className="text-xs mb-3 font-semibold">{config.appSubtitle}</p>
+      
+      <div className="w-full border-t-2 border-dashed my-3" style={{ borderColor: '#000000' }} />
+      
+      <p className="text-sm font-bold uppercase tracking-widest mb-1">Nomor Antrean</p>
+      <h2 className="text-6xl font-black mb-3 tracking-tighter">{queue.number}</h2>
+      
+      <div className="w-full border-t my-3" style={{ borderColor: '#000000' }} />
+      
+      <div className="w-full text-left space-y-3 mb-3">
+        <div>
+          <p className="text-xs font-bold uppercase border-b inline-block mb-1" style={{ borderColor: '#cccccc' }}>Nama Peserta</p>
+          <p className="text-sm font-bold uppercase">{queue.nama}</p>
+        </div>
+        <div>
+          <p className="text-xs font-bold uppercase border-b inline-block mb-1" style={{ borderColor: '#cccccc' }}>NISN</p>
+          <p className="text-base font-bold tracking-widest">{queue.nisn || '-'}</p>
+        </div>
+        <div>
+          <p className="text-xs font-bold uppercase border-b inline-block mb-1" style={{ borderColor: '#cccccc' }}>Asal Sekolah</p>
+          <p className="text-sm font-bold uppercase">{queue.asalSekolah}</p>
+        </div>
+      </div>
+
+      <div className="w-full border-t-2 border-dashed my-3" style={{ borderColor: '#000000' }} />
+
+      <p className="text-[10px] font-bold">
+        Waktu Cetak: {new Date(queue.timestamp).toLocaleString('id-ID')}
+      </p>
+      <p className="text-[10px] font-bold uppercase tracking-widest mt-2">
+        Harap Simpan Tiket Ini
+      </p>
+    </div>
+  );
+};
 

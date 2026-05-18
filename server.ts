@@ -12,6 +12,7 @@ async function startServer() {
 
   // --- Simple In-Memory Database ---
   let queues: any[] = [];
+  let operators: any[] = [];
   let schools: any[] = [
     { id: '1', nama: 'UPT SMP NEGERI 1 PASURUAN' },
     { id: '2', nama: 'UPT SMP NEGERI 2 PASURUAN' },
@@ -47,14 +48,41 @@ async function startServer() {
     appTitle: "Antrean PPDB 2024",
     appSubtitle: "Loket Layanan Informasi & Pendaftaran",
     logoUrl: "",
-    barcodeUrl: ""
+    barcodeUrl: "",
+    serviceStartTime: "08:00",
+    serviceEndTime: "15:00"
   };
 
   // --- API Routes ---
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
 
   // Get all data
   app.get("/api/initial-data", (req, res) => {
-    res.json({ queues, schools, config });
+    res.json({ queues, schools, config, operators });
+  });
+
+  // Operator CRUD
+  app.post("/api/operators", (req, res) => {
+    const newOp = { ...req.body, id: Date.now().toString() };
+    operators.push(newOp);
+    res.status(201).json(newOp);
+  });
+
+  app.delete("/api/operators/:id", (req, res) => {
+    operators = operators.filter(op => op.id !== req.params.id);
+    res.json({ success: true });
+  });
+
+  app.put("/api/operators/:id", (req, res) => {
+    const index = operators.findIndex(op => op.id === req.params.id);
+    if (index !== -1) {
+      operators[index] = { ...operators[index], ...req.body };
+      res.json(operators[index]);
+    } else {
+      res.status(404).json({ error: "Not found" });
+    }
   });
 
   // Add to queue
@@ -63,8 +91,7 @@ async function startServer() {
       ...req.body,
       id: Date.now().toString(),
       timestamp: new Date().toISOString(),
-      status: 'waiting',
-      participantStatus: 'menunggu'
+      status: 'waiting'
     };
     queues.push(newQueue);
     res.status(201).json(newQueue);
@@ -125,8 +152,10 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on port ${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("Critical: Server failed to start:", err);
+});
