@@ -43,14 +43,14 @@ import {
   Pencil,
   Play,
   Pause,
-  ChevronLeft
+  ChevronLeft,
+  Clock
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { initAuth, googleSignIn, getAccessToken, logout } from './lib/firebase';
-import type { User as FirebaseUser } from 'firebase/auth';
+
 
 // --- Configuration ---
 const API_URL = ''; // Same origin
@@ -69,6 +69,7 @@ interface QueueItem {
 interface AppConfig {
   appTitle: string;
   appSubtitle: string;
+  runningText?: string;
   servingIndex: number;
   logoUrl?: string;
   barcodeUrl?: string;
@@ -143,14 +144,12 @@ export default function App() {
   const [schools, setSchools] = useState<School[]>([]);
   const [operators, setOperators] = useState<Operator[]>([]);
   const [currentUser, setCurrentUser] = useState<{ type: 'admin' | 'operator', name: string, table?: string } | null>(null);
-  
-  // Google Auth State
-  const [googleUser, setGoogleUser] = useState<FirebaseUser | null>(null);
-  const [googleAuthError, setGoogleAuthError] = useState(false);
   const [isExportingSheets, setIsExportingSheets] = useState(false);
+
   const [config, setConfig] = useState<AppConfig>({
     appTitle: 'Antrean PPDB',
     appSubtitle: 'Loket Layanan Pendaftaran',
+    runningText: 'Selamat Datang di Layanan PPDB. Silakan ambil nomor antrean Anda.',
     servingIndex: -1,
     logoUrl: '',
     barcodeUrl: '',
@@ -168,6 +167,7 @@ export default function App() {
   // local settings state for editing
   const [editTitle, setEditTitle] = useState('');
   const [editSubtitle, setEditSubtitle] = useState('');
+  const [editRunningText, setEditRunningText] = useState('');
   const [editStartTime, setEditStartTime] = useState('');
   const [editEndTime, setEditEndTime] = useState('');
   const [editTicketTemplate, setEditTicketTemplate] = useState<'receipt' | 'modern' | 'elegant'>('receipt');
@@ -220,6 +220,7 @@ export default function App() {
       // Initialize edit fields when data arrives
       setEditTitle(prev => prev || data.config.appTitle);
       setEditSubtitle(prev => prev || data.config.appSubtitle);
+      setEditRunningText(prev => prev || data.config.runningText || '');
       setEditStartTime(prev => prev || data.config.serviceStartTime);
       setEditEndTime(prev => prev || data.config.serviceEndTime);
       setEditTicketTemplate(prev => prev || data.config.ticketTemplate || 'receipt');
@@ -236,15 +237,8 @@ export default function App() {
     fetchData();
     const interval = setInterval(fetchData, 3000);
     
-    // Initialize Google Auth listener
-    const unsubscribeAuth = initAuth(
-      (user) => { setGoogleUser(user); setGoogleAuthError(false); },
-      () => { setGoogleUser(null); setGoogleAuthError(true); }
-    );
-    
     return () => {
       clearInterval(interval);
-      unsubscribeAuth();
     };
   }, []);
 
@@ -357,6 +351,17 @@ export default function App() {
       return;
     }
 
+    const existingNisn = queues.find(q => q.nisn === formData.nisn);
+    if (existingNisn) {
+      setModal({
+        isOpen: true,
+        title: 'Pendaftaran Ditolak',
+        message: 'NISN ini sudah mengambil tiket antrean dan tidak diizinkan untuk mendaftar kembali.',
+        type: 'error'
+      });
+      return;
+    }
+
     if (/\d/.test(formData.nama)) {
       setModal({
         isOpen: true,
@@ -408,10 +413,11 @@ export default function App() {
         fetchData();
         setFormData({ nama: '', nisn: '', asalSekolah: '', noHp: '' });
         setIsManualSchool(false);
+        const waktuDaftar = new Date(newQueue.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB';
         setModal({
           isOpen: true,
           title: 'BERHASIL!',
-          message: `NOMOR ANTREAN: ${formattedNumber}\nNAMA: ${newQueue.nama}`,
+          message: `NOMOR ANTREAN: ${formattedNumber}\nNAMA: ${newQueue.nama}\nWAKTU DAFTAR: ${waktuDaftar}`,
           type: 'info'
         });
       }
@@ -553,75 +559,43 @@ export default function App() {
     }
   };
 
-  const handleGoogleLogin = async () => {
-    try {
-      await googleSignIn();
-    } catch (err) {
-      setModal({ isOpen: true, title: 'Login Gagal', message: 'Gagal login melalui Google. Silakan coba lagi.', type: 'error' });
-    }
-  };
+
 
   const exportToGoogleSheets = async () => {
-    const token = await getAccessToken();
-    if (!token) {
-      setModal({ isOpen: true, title: 'Error', message: 'Silakan login ke Google terlebih dahulu.', type: 'error' });
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `Anda akan mengekspor ${queues.length} data antrean ke Google Sheets. Apakah Anda yakin?`
-    );
-    if (!confirmed) return;
-
     setIsExportingSheets(true);
     try {
-      // Create a Google Sheet
-      const res = await fetch('https://sheets.googleapis.com/v4/spreadsheets', {
+      // URL Web App dari Google Apps Script
+      const webAppUrl = 'https://script.google.com/macros/s/AKfycbyfe6PGWF-JOHUSI5clvF7aWTP7Twgo6_PfWcJGfmDAJIeLPYKO0RAdN2W9RQ8p-LhEiQ/exec';
+      
+      const payload = queues.map(q => ({
+        Nomor: q.number,
+        NISN: q.nisn,
+        Nama: q.nama,
+        AsalSekolah: q.asalSekolah,
+        NoHP: q.noHp,
+        Status: q.status,
+        WaktuDaftar: new Date(q.timestamp).toLocaleString('id-ID'),
+        WaktuSelesai: q.completedAt ? new Date(q.completedAt).toLocaleString('id-ID') : '-'
+      }));
+
+      // Menggunakan fetch dengan mode no-cors dan memformat body sebagai URL encoded
+      await fetch(webAppUrl, {
         method: 'POST',
+        mode: 'no-cors',
         headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: JSON.stringify({
-          properties: {
-            title: `Data_Antrean_${new Date().toISOString().split('T')[0]}`
-          }
+        body: new URLSearchParams({
+          data: JSON.stringify(payload)
         })
       });
 
-      const sheetData = await res.json();
-      if (!res.ok) throw new Error(sheetData.error?.message || 'Gagal membuat spreadsheet');
-
-      const spreadsheetId = sheetData.spreadsheetId;
-
-      // Formatting data
-      const headers = ['Nomor Antrean', 'NISN', 'Nama Pendaftar', 'Asal Sekolah', 'No HP', 'Waktu Ambil', 'Status', 'Waktu Selesai'];
-      const values = queues.map(q => [
-        q.number || '',
-        ...[q.nisn, q.nama, q.asalSekolah, q.noHp].map(String),
-        new Date(q.timestamp).toLocaleString('id-ID'),
-        q.status,
-        q.completedAt ? new Date(q.completedAt).toLocaleString('id-ID') : '-'
-      ]);
-
-      // Update data into the new Sheet
-      const updateRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/A1:H${values.length + 1}?valueInputOption=USER_ENTERED`, {
-        method: 'PUT',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          values: [headers, ...values]
-        })
-      });
-
-      if (!updateRes.ok) throw new Error('Gagal menulis data ke spreadsheet');
-
+      // Karena mode 'no-cors', kita tidak bisa mendapatkan status response aslinya, 
+      // jadi kita berasumsi permintaan berhasil dikirim.
       setModal({ 
         isOpen: true, 
         title: 'Berhasil', 
-        message: `Data berhasil diekspor ke Google Sheets!\nID Spreadsheet: ${spreadsheetId}\nAnda bisa melihatnya di Google Drive akun yang Anda gunakan.`, 
+        message: 'Data berhasil dikirim ke Google Sheets!\n\n(Catatan: Buka Google Sheets Anda untuk melihat data yang masuk)', 
         type: 'info' 
       });
 
@@ -646,23 +620,29 @@ export default function App() {
     const html = `
       <html>
         <head>
-          <title>Laporan Antrean</title>
+          <title>Laporan ${config.appTitle}</title>
           <style>
-            table { width: 100%; border-collapse: collapse; }
-            th, td { border: 1px solid black; padding: 8px; text-align: left; }
-            h1 { text-align: center; }
+            body { font-family: sans-serif; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th, td { border: 1px solid #ccc; padding: 10px; text-align: left; font-size: 14px; }
+            th { background-color: #f8fafc; font-weight: bold; }
+            h1 { text-align: center; margin-bottom: 5px; }
+            h3 { text-align: center; font-weight: normal; color: #64748b; margin-top: 0; }
           </style>
         </head>
         <body>
-          <h1>Laporan Antrean PPDB</h1>
+          <h1>Laporan ${config.appTitle}</h1>
+          <h3>${config.appSubtitle}</h3>
           <table>
             <thead>
               <tr>
-                <th>No</th>
-                <th>Nama</th>
-                <th>Sekolah</th>
-                <th>HP</th>
+                <th>Antrean</th>
+                <th>Nama Peserta</th>
+                <th>NISN</th>
+                <th>Asal Sekolah</th>
                 <th>Status</th>
+                <th>Waktu Daftar</th>
+                <th>Waktu Selesai</th>
               </tr>
             </thead>
             <tbody>
@@ -670,9 +650,11 @@ export default function App() {
                 <tr>
                   <td>${q.number}</td>
                   <td>${q.nama}</td>
+                  <td>${q.nisn || '-'}</td>
                   <td>${q.asalSekolah}</td>
-                  <td>${q.noHp}</td>
-                  <td>${q.status}</td>
+                  <td>${q.status === 'completed' ? 'SELESAI' : q.status === 'serving' ? 'DIPANGGIL' : q.status === 'rejected' ? 'DITOLAK' : 'MENUNGGU'}</td>
+                  <td>${new Date(q.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB</td>
+                  <td>${q.completedAt ? new Date(q.completedAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB' : '-'}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -735,6 +717,7 @@ export default function App() {
       await updateConfig({ 
         appTitle: editTitle, 
         appSubtitle: editSubtitle,
+        runningText: editRunningText,
         serviceStartTime: editStartTime,
         serviceEndTime: editEndTime,
         ticketTemplate: editTicketTemplate
@@ -998,6 +981,20 @@ export default function App() {
         </div>
       </header>
 
+      {/* Running Text Banner */}
+      {(!isAdmin && config.runningText) && (
+        <div className="w-full bg-slate-900 text-amber-400 py-2.5 px-4 overflow-hidden border-b border-amber-500/20 shadow-inner flex items-center relative z-0">
+          <div className="max-w-7xl mx-auto w-full flex items-center">
+            <span className="bg-amber-500 text-slate-900 text-xs font-bold px-3 py-1 rounded-sm uppercase tracking-widest mr-4 whitespace-nowrap z-10 flex-shrink-0">
+              Pengumuman
+            </span>
+            <marquee scrollamount="6" className="text-sm font-bold tracking-wide flex-1">
+              {config.runningText}
+            </marquee>
+          </div>
+        </div>
+      )}
+
       {/* Main Content */}
       <main className="flex-1 max-w-7xl mx-auto px-4 py-8 sm:px-6 lg:px-8 w-full overflow-hidden flex flex-col">
         
@@ -1181,6 +1178,7 @@ export default function App() {
                     <div className="mb-6 space-y-1">
                       <p className="text-2xl font-bold text-slate-800 uppercase line-clamp-1">{currentQueueObj.nama}</p>
                       <p className="text-slate-500 line-clamp-1">{currentQueueObj.asalSekolah}</p>
+                      <p className="text-xs font-bold text-slate-400 mt-2 bg-slate-100 px-3 py-1 rounded inline-block">Waktu Daftar: {new Date(currentQueueObj.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB</p>
                     </div>
                   ) : (
                     <div className="mb-6 text-slate-400 italic">Belum ada antrean yang dipanggil</div>
@@ -1202,9 +1200,15 @@ export default function App() {
                            <div className="bg-blue-600 text-white font-black px-2 py-1 rounded text-sm shrink-0">
                              {q.number}
                            </div>
-                           <div className="overflow-hidden">
-                             <p className="font-bold text-sm text-slate-800 truncate">{q.nama}</p>
-                             <p className="text-[10px] text-slate-500 truncate">{q.asalSekolah}</p>
+                           <div className="overflow-hidden w-full flex justify-between items-center pr-2">
+                             <div>
+                               <p className="font-bold text-sm text-slate-800 truncate">{q.nama}</p>
+                               <p className="text-[10px] text-slate-500 truncate">{q.asalSekolah}</p>
+                             </div>
+                             <div className="text-[10px] text-slate-400 font-medium whitespace-nowrap bg-white px-2 py-0.5 rounded border border-slate-100 flex items-center gap-1">
+                               <Clock className="w-3 h-3" />
+                               {new Date(q.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                             </div>
                            </div>
                          </div>
                        ))}
@@ -1485,28 +1489,10 @@ export default function App() {
                       <p className="text-sm text-slate-500 mt-1">Kelola dan lihat rincian pendaftar hari ini secara detail.</p>
                     </div>
                     <div className="flex items-center gap-3">
-                      {!googleUser ? (
-                        <button onClick={handleGoogleLogin} className="flex items-center gap-2 px-4 py-2 bg-white text-slate-700 border border-slate-300 text-sm font-bold rounded-xl hover:bg-slate-50 transition-colors shadow-sm">
-                          <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-4 h-4">
-                            <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
-                            <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
-                            <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
-                            <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
-                            <path fill="none" d="M0 0h48v48H0z"></path>
-                          </svg>
-                          <span>Sign in dengan Google</span>
-                        </button>
-                      ) : (
-                        <div className="flex bg-white rounded-xl border border-emerald-200 overflow-hidden shadow-sm">
-                          <button onClick={exportToGoogleSheets} disabled={isExportingSheets} className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-700 text-sm font-bold hover:bg-emerald-100 transition-colors">
-                            <FileSpreadsheet className="h-4 w-4" />
-                            <span>{isExportingSheets ? 'Mengekspor...' : 'Export ke Google Sheets'}</span>
-                          </button>
-                          <button onClick={logout} title="Sign Out dari Google" className="px-3 py-2 bg-white text-slate-500 hover:text-red-600 hover:bg-red-50 border-l border-emerald-200 transition-colors">
-                            Logout
-                          </button>
-                        </div>
-                      )}
+                      <button onClick={exportToGoogleSheets} disabled={isExportingSheets} className="flex items-center gap-2 px-4 py-2 bg-emerald-50 text-emerald-700 border border-emerald-200 text-sm font-bold rounded-xl hover:bg-emerald-100 transition-colors shadow-sm disabled:opacity-50">
+                        <FileSpreadsheet className="h-4 w-4" />
+                        <span>{isExportingSheets ? 'Mengekspor...' : 'Export ke Google Sheets'}</span>
+                      </button>
                       <button onClick={exportToExcel} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-bold rounded-xl hover:bg-emerald-700 transition-colors">
                         <FileSpreadsheet className="h-4 w-4" />
                         <span>Export Excel</span>
@@ -2030,6 +2016,17 @@ export default function App() {
                           id="app-subtitle-input"
                         />
                       </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-slate-700 mb-1">Teks Berjalan (Pengumuman)</label>
+                        <input 
+                          type="text" 
+                          value={editRunningText}
+                          onChange={(e) => setEditRunningText(e.target.value)}
+                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                          placeholder="Misal: Info penting pendaftaran dapat dilihat di papan pengumuman..."
+                          id="app-runningtext-input"
+                        />
+                      </div>
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">Layanan Buka</label>
@@ -2068,6 +2065,7 @@ export default function App() {
                           disabled={isSavingSettings || (
                             editTitle === config.appTitle && 
                             editSubtitle === config.appSubtitle &&
+                            editRunningText === (config.runningText || '') &&
                             editStartTime === config.serviceStartTime &&
                             editEndTime === config.serviceEndTime &&
                             editTicketTemplate === (config.ticketTemplate || 'receipt')
@@ -2219,6 +2217,13 @@ export default function App() {
         )}
 
       </main>
+
+      {/* Footer */}
+      <footer className="w-full py-4 !bg-slate-50 border-t border-slate-200 text-center flex justify-center mt-auto relative z-10">
+        <p className="text-xs text-slate-500 font-medium">
+          create : <a href="https://lynk.id/ajisosiologi" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800 hover:underline font-bold transition-colors">@ajisosiologi 2026</a>
+        </p>
+      </footer>
 
       {/* Hidden Download Template */}
       <TicketTemplate queue={lastCreatedQueue} config={config} />
