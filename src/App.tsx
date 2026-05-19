@@ -225,7 +225,19 @@ export default function App() {
 
     const unsubConfig = onSnapshot(doc(db, 'config', 'main'), (snapshot) => {
       if (snapshot.exists()) {
-        const c = snapshot.data() as AppConfig;
+        const data = snapshot.data();
+        const c = {
+          appTitle: data.appTitle || 'Antrean PPDB',
+          appSubtitle: data.appSubtitle || 'Loket Layanan Pendaftaran',
+          runningText: data.runningText || '',
+          servingIndex: typeof data.servingIndex === 'number' ? data.servingIndex : -1,
+          logoUrl: data.logoUrl || '',
+          barcodeUrl: data.barcodeUrl || '',
+          serviceStartTime: data.serviceStartTime || '08:00',
+          serviceEndTime: data.serviceEndTime || '15:00',
+          ticketTemplate: data.ticketTemplate || 'receipt',
+          isServicePaused: data.isServicePaused || false
+        } as AppConfig;
         setConfig(c);
         setEditTitle(c.appTitle);
         setEditSubtitle(c.appSubtitle);
@@ -298,6 +310,8 @@ export default function App() {
   const speakQueue = useCallback((queueObj: QueueItem) => {
     if (!window.speechSynthesis || !queueObj) return;
 
+    window.speechSynthesis.cancel(); // Clear any pending speech
+
     const splitNumber = queueObj.number.split('').map(char => {
       if (char === '-') return ' ';
       if (char === '0') return 'nol ';
@@ -313,6 +327,12 @@ export default function App() {
 
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    // Fallback if onstart/onend doesn't fire (browser restrictions)
+    setTimeout(() => {
+      setIsSpeaking(false);
+    }, 10000); // 10 seconds max lock
 
     window.speechSynthesis.speak(utterance);
   }, []);
@@ -427,10 +447,13 @@ export default function App() {
   };
 
   const handlePanggilBerikutnya = async () => {
-    if (config.servingIndex < queues.length - 1) {
-      const nextIndex = config.servingIndex + 1;
+    const currentIndex = typeof config.servingIndex === 'number' ? config.servingIndex : -1;
+    if (currentIndex < queues.length - 1) {
+      const nextIndex = currentIndex + 1;
       const nextQueue = queues[nextIndex];
       
+      if (!nextQueue) return;
+
       // Optimistically update the UI immediately before speaking
       setConfig(prev => ({ ...prev, servingIndex: nextIndex }));
       speakQueue(nextQueue);
@@ -438,8 +461,8 @@ export default function App() {
       try {
         await setDoc(doc(db, 'config', 'main'), { servingIndex: nextIndex }, { merge: true });
         await updateDoc(doc(db, 'queues', nextQueue.id), { status: 'serving' });
-        if (config.servingIndex >= 0 && queues[config.servingIndex]) {
-          await updateDoc(doc(db, 'queues', queues[config.servingIndex].id), { status: 'completed' });
+        if (currentIndex >= 0 && queues[currentIndex]) {
+          await updateDoc(doc(db, 'queues', queues[currentIndex].id), { status: 'completed' });
         }
       } catch (error) {
         console.error("API Error:", error);
@@ -448,18 +471,20 @@ export default function App() {
   };
 
   const handlePanggilManual = async (direction: 'next' | 'prev') => {
-    let newIndex = config.servingIndex;
-    if (direction === 'next' && config.servingIndex < queues.length - 1) {
+    let newIndex = typeof config.servingIndex === 'number' ? config.servingIndex : -1;
+    if (direction === 'next' && newIndex < queues.length - 1) {
       newIndex += 1;
-    } else if (direction === 'prev' && config.servingIndex >= 0) {
+    } else if (direction === 'prev' && newIndex > 0) {
       newIndex -= 1;
     } else {
       return;
     }
     
-    if (newIndex < 0) return;
+    if (newIndex < 0 || newIndex >= queues.length) return;
     
     const targetQueue = queues[newIndex];
+    if (!targetQueue) return;
+
     setConfig(prev => ({ ...prev, servingIndex: newIndex }));
     speakQueue(targetQueue);
 
@@ -471,9 +496,28 @@ export default function App() {
     }
   };
 
+  const handlePanggilSpesifik = async (index: number) => {
+    if (index < 0 || index >= queues.length) return;
+    
+    const targetQueue = queues[index];
+    if (!targetQueue) return;
+
+    setConfig(prev => ({ ...prev, servingIndex: index }));
+    speakQueue(targetQueue);
+
+    try {
+      await setDoc(doc(db, 'config', 'main'), { servingIndex: index }, { merge: true });
+      await updateDoc(doc(db, 'queues', targetQueue.id), { status: 'serving' });
+    } catch (error) {
+       console.error("API Error:", error);
+    }
+  };
+
   const handlePanggilUlang = () => {
-    if (config.servingIndex >= 0 && config.servingIndex < queues.length) {
-      speakQueue(queues[config.servingIndex]);
+    const currentIndex = typeof config.servingIndex === 'number' ? config.servingIndex : -1;
+    if (currentIndex >= 0 && currentIndex < queues.length) {
+      const q = queues[currentIndex];
+      if (q) speakQueue(q);
     }
   };
 
@@ -484,10 +528,15 @@ export default function App() {
       message: 'Hapus semua data antrean hari ini?',
       type: 'confirm',
       onConfirm: async () => {
-        const snap = await getDocs(collection(db, 'queues'));
-        const promises = snap.docs.map(d => deleteDoc(doc(db, 'queues', d.id)));
-        await Promise.all(promises);
-        await setDoc(doc(db, 'config', 'main'), { servingIndex: -1 }, { merge: true });
+        try {
+          const snap = await getDocs(collection(db, 'queues'));
+          const promises = snap.docs.map(d => deleteDoc(doc(db, 'queues', d.id)));
+          await Promise.all(promises);
+          await setDoc(doc(db, 'config', 'main'), { servingIndex: -1 }, { merge: true });
+          setConfig(prev => ({ ...prev, servingIndex: -1 }));
+        } catch (e) {
+          console.error("Reset error", e);
+        }
       }
     });
   };
@@ -1865,6 +1914,25 @@ export default function App() {
                           <RotateCcw className="h-5 w-5" />
                           <span className="text-xs">Reset Antrean</span>
                         </button>
+                      </div>
+
+                      <div className="pt-4 border-t border-slate-200">
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Panggil Pilihan Bebas</label>
+                        <select 
+                          className="w-full bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-3"
+                          value=""
+                          onChange={(e) => {
+                            if (e.target.value !== "") {
+                              handlePanggilSpesifik(Number(e.target.value));
+                            }
+                          }}
+                          disabled={isSpeaking || queues.length === 0}
+                        >
+                          <option value="" disabled>Pilih Nomor Antrean...</option>
+                          {queues.map((q, idx) => (
+                            <option key={q.id} value={idx}>{q.number} - {q.nama}</option>
+                          ))}
+                        </select>
                       </div>
 
                       <button
