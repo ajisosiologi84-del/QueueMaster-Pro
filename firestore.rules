@@ -1,0 +1,26 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Basic rules that allow reading everything so the Kiosk works.
+    // For a real production app, implement Firebase Auth.
+    match /queues/{queueId} {
+      allow read: if true;
+      allow write: if true; 
+    }
+    match /config/{confId} {
+      allow read: if true;
+      allow write: if true;
+    }
+    match /schools/{schoolId} {
+      allow read: if true;
+      allow write: if true;
+    }
+    match /operators/{operatorId} {
+      allow read: if true;
+      allow write: if true;
+    }
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

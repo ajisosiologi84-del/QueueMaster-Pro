@@ -1,0 +1,77 @@
+{
+  "entities": {
+    "QueueItem": {
+      "title": "QueueItem",
+      "description": "Represents a person in the queue",
+      "type": "object",
+      "properties": {
+        "number": { "type": "string" },
+        "nama": { "type": "string" },
+        "nisn": { "type": "string" },
+        "asalSekolah": { "type": "string" },
+        "noHp": { "type": "string" },
+        "status": { "type": "string", "enum": ["waiting", "serving", "completed", "rejected"] },
+        "timestamp": { "type": "string" },
+        "completedAt": { "type": "string" }
+      },
+      "required": ["number", "nama", "nisn", "asalSekolah", "noHp", "status", "timestamp"]
+    },
+    "AppConfig": {
+      "title": "AppConfig",
+      "description": "Global application configuration",
+      "type": "object",
+      "properties": {
+        "appTitle": { "type": "string" },
+        "appSubtitle": { "type": "string" },
+        "runningText": { "type": "string" },
+        "servingIndex": { "type": "number" },
+        "logoUrl": { "type": "string" },
+        "barcodeUrl": { "type": "string" },
+        "serviceStartTime": { "type": "string" },
+        "serviceEndTime": { "type": "string" },
+        "ticketTemplate": { "type": "string", "enum": ["receipt", "modern", "elegant"] },
+        "isServicePaused": { "type": "boolean" }
+      },
+      "required": ["appTitle", "appSubtitle", "servingIndex", "serviceStartTime", "serviceEndTime", "isServicePaused"]
+    },
+    "School": {
+      "title": "School",
+      "description": "A registered school",
+      "type": "object",
+      "properties": {
+        "nama": { "type": "string" }
+      },
+      "required": ["nama"]
+    },
+    "Operator": {
+      "title": "Operator",
+      "description": "A system operator",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string" },
+        "password": { "type": "string" },
+        "displayName": { "type": "string" },
+        "tableNumber": { "type": "string" }
+      },
+      "required": ["username", "password", "displayName", "tableNumber"]
+    }
+  },
+  "firestore": {
+    "/queues/{queueId}": {
+      "schema": { "$ref": "#/entities/QueueItem" },
+      "description": "The queue items"
+    },
+    "/config/main": {
+      "schema": { "$ref": "#/entities/AppConfig" },
+      "description": "Singleton configuration document"
+    },
+    "/schools/{schoolId}": {
+      "schema": { "$ref": "#/entities/School" },
+      "description": "List of schools"
+    },
+    "/operators/{operatorId}": {
+      "schema": { "$ref": "#/entities/Operator" },
+      "description": "List of operators"
+    }
+  }
+}
