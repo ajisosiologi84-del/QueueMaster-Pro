@@ -79,6 +79,7 @@ interface AppConfig {
   serviceEndTime: string;
   ticketTemplate?: 'receipt' | 'modern' | 'elegant';
   isServicePaused?: boolean;
+  kioskPassword?: string;
 }
 
 interface School {
@@ -174,6 +175,10 @@ export default function App() {
   const [editEndTime, setEditEndTime] = useState('');
   const [editTicketTemplate, setEditTicketTemplate] = useState<'receipt' | 'modern' | 'elegant'>('receipt');
   const [editIsServicePaused, setEditIsServicePaused] = useState(false);
+  const [editKioskPassword, setEditKioskPassword] = useState('');
+  const [showKioskPasswordModal, setShowKioskPasswordModal] = useState(false);
+  const [kioskPasswordInput, setKioskPasswordInput] = useState('');
+  const [kioskPasswordError, setKioskPasswordError] = useState('');
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [lastCreatedQueue, setLastCreatedQueue] = useState<QueueItem | null>(null);
   
@@ -236,7 +241,8 @@ export default function App() {
           serviceStartTime: data.serviceStartTime || '08:00',
           serviceEndTime: data.serviceEndTime || '15:00',
           ticketTemplate: data.ticketTemplate || 'receipt',
-          isServicePaused: data.isServicePaused || false
+          isServicePaused: data.isServicePaused || false,
+          kioskPassword: data.kioskPassword || ''
         } as AppConfig;
         setConfig(c);
         setEditTitle(c.appTitle);
@@ -245,6 +251,7 @@ export default function App() {
         setEditStartTime(c.serviceStartTime);
         setEditEndTime(c.serviceEndTime);
         setEditTicketTemplate(c.ticketTemplate || 'receipt');
+        setEditKioskPassword(c.kioskPassword || '');
       }
       setIsInitialLoading(false);
     });
@@ -344,6 +351,41 @@ export default function App() {
   };
 
   // --- API Handlers ---
+  const submitRegistration = async () => {
+    try {
+      const nextNum = queues.length + 1;
+      const formattedNumber = `A-${nextNum.toString().padStart(3, '0')}`;
+      
+
+      const queueData = {
+        number: formattedNumber,
+        nama: formData.nama,
+        nisn: formData.nisn,
+        asalSekolah: formData.asalSekolah,
+        noHp: formData.noHp,
+        timestamp: new Date().toISOString(),
+        status: 'waiting'
+      };
+      const docRef = await addDoc(collection(db, 'queues'), queueData);
+      const newQueue = { id: docRef.id, ...queueData } as QueueItem;
+      
+      setLastCreatedQueue(newQueue);
+      
+      setFormData({ nama: '', nisn: '', asalSekolah: '', noHp: '' });
+      setIsManualSchool(false);
+      const waktuDaftar = new Date(newQueue.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB';
+      setModal({
+        isOpen: true,
+        title: 'BERHASIL!',
+        message: `NOMOR ANTREAN: ${formattedNumber}\nNAMA: ${newQueue.nama}\nWAKTU DAFTAR: ${waktuDaftar}`,
+        type: 'info'
+      });
+
+    } catch (error) {
+      setModal({ isOpen: true, title: 'Error', message: 'Gagal menghubungi server.', type: 'error' });
+    }
+  };
+
   const handleAmbilAntrean = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -408,42 +450,15 @@ export default function App() {
       return;
     }
 
-    try {
-      const nextNum = queues.length + 1;
-      const formattedNumber = `A-${nextNum.toString().padStart(3, '0')}`;
-      
-
-      const queueData = {
-        number: formattedNumber,
-        nama: formData.nama,
-        nisn: formData.nisn,
-        asalSekolah: formData.asalSekolah,
-        noHp: formData.noHp,
-        timestamp: new Date().toISOString(),
-        status: 'waiting'
-      };
-      const docRef = await addDoc(collection(db, 'queues'), queueData);
-      const newQueue = { id: docRef.id, ...queueData } as QueueItem;
-      
-      setLastCreatedQueue(newQueue);
-      
-      if (!schools.some(s => s.nama === formData.asalSekolah)) {
-        await addDoc(collection(db, 'schools'), { nama: formData.asalSekolah });
-      }
-
-      setFormData({ nama: '', nisn: '', asalSekolah: '', noHp: '' });
-      setIsManualSchool(false);
-      const waktuDaftar = new Date(newQueue.timestamp).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) + ' WIB';
-      setModal({
-        isOpen: true,
-        title: 'BERHASIL!',
-        message: `NOMOR ANTREAN: ${formattedNumber}\nNAMA: ${newQueue.nama}\nWAKTU DAFTAR: ${waktuDaftar}`,
-        type: 'info'
-      });
-
-    } catch (error) {
-      setModal({ isOpen: true, title: 'Error', message: 'Gagal menghubungi server.', type: 'error' });
+    // Check kiosk password requirement
+    if (config.kioskPassword && config.kioskPassword.trim() !== '') {
+      setShowKioskPasswordModal(true);
+      setKioskPasswordInput('');
+      setKioskPasswordError('');
+      return;
     }
+
+    await submitRegistration();
   };
 
   const handlePanggilBerikutnya = async () => {
@@ -730,7 +745,8 @@ export default function App() {
         runningText: editRunningText,
         serviceStartTime: editStartTime,
         serviceEndTime: editEndTime,
-        ticketTemplate: editTicketTemplate
+        ticketTemplate: editTicketTemplate,
+        kioskPassword: editKioskPassword
       });
       setModal({
         isOpen: true,
@@ -903,6 +919,80 @@ export default function App() {
                   {modal.type === 'confirm' ? 'Ya, Lanjutkan' : 'Tutup'}
                 </button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Password Modal Kiosk */}
+      <AnimatePresence>
+        {showKioskPasswordModal && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4"
+          >
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center border border-slate-100"
+            >
+              <div className="mx-auto w-12 h-12 rounded-full flex items-center justify-center mb-4 bg-orange-100 text-orange-600">
+                <Lock className="h-6 w-6" />
+              </div>
+              <h3 className="text-xl font-bold mb-2 text-slate-800">Verifikasi Sandi Kiosk</h3>
+              <p className="text-slate-500 mb-6 text-sm leading-relaxed">
+                Silakan masukkan kata sandi yang ditentukan oleh petugas untuk mendaftar dan mencetak nomor antrean ini.
+              </p>
+              
+              <form onSubmit={async (e) => {
+                e.preventDefault();
+                if (kioskPasswordInput === config.kioskPassword) {
+                  setShowKioskPasswordModal(false);
+                  setKioskPasswordInput('');
+                  setKioskPasswordError('');
+                  await submitRegistration();
+                } else {
+                  setKioskPasswordError('Sandi salah! Silakan coba lagi.');
+                }
+              }}>
+                <div className="mb-4">
+                  <input
+                    type="password"
+                    placeholder="Kata Sandi Kiosk"
+                    value={kioskPasswordInput}
+                    onChange={(e) => setKioskPasswordInput(e.target.value)}
+                    required
+                    autoFocus
+                    className="w-full px-4 py-3 rounded-xl border border-slate-300 text-center tracking-widest text-lg font-bold focus:ring-2 focus:ring-orange-500 focus:border-orange-500 transition-all outline-none"
+                  />
+                  {kioskPasswordError && (
+                    <p className="text-red-500 text-xs font-bold mt-2">{kioskPasswordError}</p>
+                  )}
+                </div>
+                
+                <div className="flex md:flex-row flex-col gap-2 justify-center mt-6">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowKioskPasswordModal(false);
+                      setKioskPasswordInput('');
+                      setKioskPasswordError('');
+                    }}
+                    className="w-full px-5 py-2.5 bg-slate-100 text-slate-700 rounded-xl font-semibold hover:bg-slate-200 transition-colors"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="w-full px-5 py-2.5 bg-orange-600 hover:bg-orange-700 active:bg-orange-800 text-white rounded-xl font-semibold transition-all shadow-md"
+                  >
+                    Verifikasi
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </motion.div>
         )}
@@ -1362,7 +1452,7 @@ export default function App() {
                           Batal
                         </button>
                       </div>
-                      <p className="text-[10px] text-blue-600 font-medium">Asal sekolah baru akan tersimpan otomatis ke daftar sistem.</p>
+                      <p className="text-[10px] text-blue-600 font-medium">Asal sekolah baru ini hanya tersimpan pada antrean Anda (tidak disimpan ke dalam daftar pilihan sistem).</p>
                     </motion.div>
                   )}
                 </div>
@@ -2072,12 +2162,24 @@ export default function App() {
                         <select
                           value={editTicketTemplate}
                           onChange={(e) => setEditTicketTemplate(e.target.value as 'receipt' | 'modern' | 'elegant')}
-                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all cursor-pointer bg-white"
+                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all cursor-pointer bg-white mb-4"
                         >
                           <option value="receipt">Struk Sederhana (Default)</option>
                           <option value="modern">Modern & Bersih</option>
                           <option value="elegant">Elegan & Premium</option>
                         </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-slate-700 mb-1">Password Sebelum Cetak Antrean (Kiosk)</label>
+                        <input 
+                          type="password" 
+                          value={editKioskPassword}
+                          onChange={(e) => setEditKioskPassword(e.target.value)}
+                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                          placeholder="Kosongkan jika tidak memakai password"
+                          id="app-kioskpassword-input"
+                        />
+                        <p className="text-[10px] text-slate-400 mt-1 uppercase font-bold tracking-tight">Jika diisi, user/pendaftar wajib memasukkan password ini sebelum dapat mencetak/mengambil nomor antrean.</p>
                       </div>
                       <div className="pt-2">
                         <button
@@ -2088,7 +2190,8 @@ export default function App() {
                             editRunningText === (config.runningText || '') &&
                             editStartTime === config.serviceStartTime &&
                             editEndTime === config.serviceEndTime &&
-                            editTicketTemplate === (config.ticketTemplate || 'receipt')
+                            editTicketTemplate === (config.ticketTemplate || 'receipt') &&
+                            editKioskPassword === (config.kioskPassword || '')
                           )}
                           className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-md transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                         >
