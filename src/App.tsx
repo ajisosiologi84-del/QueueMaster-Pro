@@ -80,6 +80,7 @@ interface AppConfig {
   ticketTemplate?: 'receipt' | 'modern' | 'elegant';
   isServicePaused?: boolean;
   kioskPassword?: string;
+  startQueueNumber?: number;
 }
 
 interface School {
@@ -159,7 +160,8 @@ export default function App() {
     serviceStartTime: '08:00',
     serviceEndTime: '15:00',
     ticketTemplate: 'receipt',
-    isServicePaused: false
+    isServicePaused: false,
+    startQueueNumber: 1
   });
   
   const [activeTab, setActiveTab] = useState<'kiosk' | 'admin' | 'database'>('kiosk');
@@ -176,6 +178,7 @@ export default function App() {
   const [editTicketTemplate, setEditTicketTemplate] = useState<'receipt' | 'modern' | 'elegant'>('receipt');
   const [editIsServicePaused, setEditIsServicePaused] = useState(false);
   const [editKioskPassword, setEditKioskPassword] = useState('');
+  const [editStartQueueNumber, setEditStartQueueNumber] = useState(1);
   const [showKioskPasswordModal, setShowKioskPasswordModal] = useState(false);
   const [kioskPasswordInput, setKioskPasswordInput] = useState('');
   const [kioskPasswordError, setKioskPasswordError] = useState('');
@@ -242,7 +245,8 @@ export default function App() {
           serviceEndTime: data.serviceEndTime || '15:00',
           ticketTemplate: data.ticketTemplate || 'receipt',
           isServicePaused: data.isServicePaused || false,
-          kioskPassword: data.kioskPassword || ''
+          kioskPassword: data.kioskPassword || '',
+          startQueueNumber: typeof data.startQueueNumber === 'number' ? data.startQueueNumber : 1
         } as AppConfig;
         setConfig(c);
         setEditTitle(c.appTitle);
@@ -252,6 +256,7 @@ export default function App() {
         setEditEndTime(c.serviceEndTime);
         setEditTicketTemplate(c.ticketTemplate || 'receipt');
         setEditKioskPassword(c.kioskPassword || '');
+        setEditStartQueueNumber(c.startQueueNumber || 1);
       }
       setIsInitialLoading(false);
     });
@@ -353,7 +358,8 @@ export default function App() {
   // --- API Handlers ---
   const submitRegistration = async () => {
     try {
-      const nextNum = queues.length + 1;
+      const startNum = config.startQueueNumber || 1;
+      const nextNum = startNum + queues.length;
       const formattedNumber = `A-${nextNum.toString().padStart(3, '0')}`;
       
 
@@ -746,7 +752,8 @@ export default function App() {
         serviceStartTime: editStartTime,
         serviceEndTime: editEndTime,
         ticketTemplate: editTicketTemplate,
-        kioskPassword: editKioskPassword
+        kioskPassword: editKioskPassword,
+        startQueueNumber: editStartQueueNumber
       });
       setModal({
         isOpen: true,
@@ -2025,6 +2032,44 @@ export default function App() {
                         </select>
                       </div>
 
+                      <div className="pt-4 border-t border-slate-200">
+                        <label className="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-2">Mulai Nomor Antrean</label>
+                        <div className="flex gap-2">
+                          <div className="relative flex-1">
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-sm">A-</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="999"
+                              value={editStartQueueNumber}
+                              onChange={(e) => setEditStartQueueNumber(Math.max(1, parseInt(e.target.value) || 1))}
+                              className="w-full bg-slate-50 border border-slate-300 text-slate-900 text-sm rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-3 pl-8 font-bold"
+                              placeholder="1"
+                            />
+                          </div>
+                          <button
+                            onClick={async () => {
+                              try {
+                                await updateConfig({ startQueueNumber: editStartQueueNumber });
+                                setModal({
+                                  isOpen: true,
+                                  title: 'Berhasil Diatur',
+                                  message: `Nomor awal antrean selanjutnya telah diatur mulai dari angka: ${editStartQueueNumber}. Tiket berikutnya akan tercetak sebagai: A-${editStartQueueNumber.toString().padStart(3, '0')}`,
+                                  type: 'info'
+                                });
+                              } catch (err) {
+                                console.error(err);
+                              }
+                            }}
+                            className="bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs font-bold px-4 py-3 rounded-xl transition-all shadow-sm uppercase tracking-wider flex items-center justify-center gap-1 shrink-0"
+                            id="set-start-number-btn"
+                          >
+                            <Play className="h-3.5 w-3.5" /> Atur No. Awal
+                          </button>
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1 uppercase font-bold tracking-tight">Menentukan nomor mulai untuk antrean pertama yang dicetak (Default: 1).</p>
+                      </div>
+
                       <button
                         onClick={() => updateConfig({ isServicePaused: !config.isServicePaused })}
                         className={`w-full py-3 px-4 rounded-xl font-semibold border transition-all flex items-center justify-center gap-2 ${
@@ -2175,11 +2220,27 @@ export default function App() {
                           type="password" 
                           value={editKioskPassword}
                           onChange={(e) => setEditKioskPassword(e.target.value)}
-                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+                          className="w-full px-4 py-2 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all mb-3"
                           placeholder="Kosongkan jika tidak memakai password"
                           id="app-kioskpassword-input"
                         />
                         <p className="text-[10px] text-slate-400 mt-1 uppercase font-bold tracking-tight">Jika diisi, user/pendaftar wajib memasukkan password ini sebelum dapat mencetak/mengambil nomor antrean.</p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-slate-700 mb-1">No. Mulai Antrean Default</label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 font-bold text-slate-400 text-sm">A-</span>
+                          <input 
+                            type="number" 
+                            min="1"
+                            max="999"
+                            value={editStartQueueNumber}
+                            onChange={(e) => setEditStartQueueNumber(Math.max(1, parseInt(e.target.value) || 1))}
+                            className="w-full px-4 py-2 pl-8 rounded-xl border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none transition-all font-bold"
+                            placeholder="1"
+                          />
+                        </div>
+                        <p className="text-[10px] text-slate-400 mt-1 uppercase font-bold tracking-tight">Menentukan nomor mulai untuk antrean pertama yang dicetak (Default: 1).</p>
                       </div>
                       <div className="pt-2">
                         <button
@@ -2191,7 +2252,8 @@ export default function App() {
                             editStartTime === config.serviceStartTime &&
                             editEndTime === config.serviceEndTime &&
                             editTicketTemplate === (config.ticketTemplate || 'receipt') &&
-                            editKioskPassword === (config.kioskPassword || '')
+                            editKioskPassword === (config.kioskPassword || '') &&
+                            editStartQueueNumber === (config.startQueueNumber || 1)
                           )}
                           className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-3 rounded-xl shadow-md transition-all disabled:opacity-50 flex items-center justify-center gap-2"
                         >
