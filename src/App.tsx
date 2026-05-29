@@ -50,7 +50,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
-import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, addDoc, getDoc, getDocs } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, updateDoc, deleteDoc, addDoc, getDoc, getDocs, runTransaction } from 'firebase/firestore';
 import { db } from './firebase';
 
 
@@ -81,6 +81,7 @@ interface AppConfig {
   isServicePaused?: boolean;
   kioskPassword?: string;
   startQueueNumber?: number;
+  lastQueueNumber?: number;
 }
 
 interface School {
@@ -358,23 +359,49 @@ export default function App() {
   // --- API Handlers ---
   const submitRegistration = async () => {
     try {
-      const startNum = config.startQueueNumber || 1;
-      const nextNum = startNum + queues.length;
-      const formattedNumber = `A-${nextNum.toString().padStart(3, '0')}`;
-      
+      const configDocRef = doc(db, 'config', 'main');
+      const newQueueDocRef = doc(collection(db, 'queues'));
 
-      const queueData = {
-        number: formattedNumber,
-        nama: formData.nama,
-        nisn: formData.nisn,
-        asalSekolah: formData.asalSekolah,
-        noHp: formData.noHp,
-        timestamp: new Date().toISOString(),
-        status: 'waiting'
-      };
-      const docRef = await addDoc(collection(db, 'queues'), queueData);
-      const newQueue = { id: docRef.id, ...queueData } as QueueItem;
-      
+      const result = await runTransaction(db, async (transaction) => {
+        const configSnap = await transaction.get(configDocRef);
+        let nextNum = 1;
+
+        if (configSnap.exists()) {
+          const configData = configSnap.data();
+          const startNum = configData.startQueueNumber || 1;
+          
+          if (typeof configData.lastQueueNumber === 'number' && configData.lastQueueNumber > 0) {
+            nextNum = configData.lastQueueNumber + 1;
+          } else {
+            // Fallback: use starting number plus current local queues length
+            nextNum = startNum + queues.length;
+          }
+        } else {
+          nextNum = (config.startQueueNumber || 1) + queues.length;
+        }
+
+        const formattedNumber = `A-${nextNum.toString().padStart(3, '0')}`;
+
+        const queueData = {
+          number: formattedNumber,
+          nama: formData.nama,
+          nisn: formData.nisn,
+          asalSekolah: formData.asalSekolah,
+          noHp: formData.noHp,
+          timestamp: new Date().toISOString(),
+          status: 'waiting'
+        };
+
+        // Write the new queue document
+        transaction.set(newQueueDocRef, queueData);
+
+        // Update the counter on the config document to prevent concurrency issues
+        transaction.update(configDocRef, { lastQueueNumber: nextNum });
+
+        return { id: newQueueDocRef.id, ...queueData };
+      });
+
+      const newQueue = result as QueueItem;
       setLastCreatedQueue(newQueue);
       
       setFormData({ nama: '', nisn: '', asalSekolah: '', noHp: '' });
@@ -383,11 +410,12 @@ export default function App() {
       setModal({
         isOpen: true,
         title: 'BERHASIL!',
-        message: `NOMOR ANTREAN: ${formattedNumber}\nNAMA: ${newQueue.nama}\nWAKTU DAFTAR: ${waktuDaftar}`,
+        message: `NOMOR ANTREAN: ${newQueue.number}\nNAMA: ${newQueue.nama}\nWAKTU DAFTAR: ${waktuDaftar}`,
         type: 'info'
       });
 
     } catch (error) {
+      console.error("Registration Error:", error);
       setModal({ isOpen: true, title: 'Error', message: 'Gagal menghubungi server.', type: 'error' });
     }
   };
@@ -553,8 +581,8 @@ export default function App() {
           const snap = await getDocs(collection(db, 'queues'));
           const promises = snap.docs.map(d => deleteDoc(doc(db, 'queues', d.id)));
           await Promise.all(promises);
-          await setDoc(doc(db, 'config', 'main'), { servingIndex: -1 }, { merge: true });
-          setConfig(prev => ({ ...prev, servingIndex: -1 }));
+          await setDoc(doc(db, 'config', 'main'), { servingIndex: -1, lastQueueNumber: 0 }, { merge: true });
+          setConfig(prev => ({ ...prev, servingIndex: -1, lastQueueNumber: 0 }));
         } catch (e) {
           console.error("Reset error", e);
         }
@@ -2050,7 +2078,10 @@ export default function App() {
                           <button
                             onClick={async () => {
                               try {
-                                await updateConfig({ startQueueNumber: editStartQueueNumber });
+                                await updateConfig({ 
+                                  startQueueNumber: editStartQueueNumber,
+                                  lastQueueNumber: editStartQueueNumber - 1 
+                                });
                                 setModal({
                                   isOpen: true,
                                   title: 'Berhasil Diatur',
