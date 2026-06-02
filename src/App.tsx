@@ -338,6 +338,31 @@ export default function App() {
     utterance.lang = 'id-ID';
     utterance.rate = 0.85; 
 
+    // Prioritize female Indonesian voice if available
+    try {
+      const voices = window.speechSynthesis.getVoices();
+      const idVoices = voices.filter(v => v.lang.toLowerCase().replace('_', '-').startsWith('id'));
+      if (idVoices.length > 0) {
+        // Prioritize voices with known female names or brand labels
+        const femaleVoice = idVoices.find(v => {
+          const name = v.name.toLowerCase();
+          return name.includes('gadis') || 
+                 name.includes('damayanti') || 
+                 name.includes('female') || 
+                 name.includes('google bahasa indonesia');
+        }) || idVoices.find(v => {
+          const name = v.name.toLowerCase();
+          return !name.includes('andika') && !name.includes('male');
+        }) || idVoices[0];
+
+        if (femaleVoice) {
+          utterance.voice = femaleVoice;
+        }
+      }
+    } catch (e) {
+      console.error("Error setting voice:", e);
+    }
+
     utterance.onstart = () => setIsSpeaking(true);
     utterance.onend = () => setIsSpeaking(false);
     utterance.onerror = () => setIsSpeaking(false);
